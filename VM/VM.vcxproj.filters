@@ -1,0 +1,90 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="main">
+      <UniqueIdentifier>{61ac3fc6-6d5e-456a-a592-3610f2f354fa}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>main</Filter>
+    </ClCompile>
+    <ClCompile Include="source\classTable.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ir.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\nativeTable.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\stack.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\stackFrameTable.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\stringPool.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\symbolTable.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\typeTable.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="source\vm.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="hpp\classTable.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\environment.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\heap.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\ir.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\nativeTable.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\property.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\stack.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\stackFrameTable.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\stringPool.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\symbolTable.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\typeTable.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="hpp\vm.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

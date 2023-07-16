@@ -58,8 +58,6 @@ private:
 
     i32 gcCounter = 0;//允许溢出，每次执行gc的时候，计数器+1
     std::list<HeapItem*> heap;//因为要删除中间的对象，所以用list
-    u64 pc = 0;
-    u64 program = 0;
 
     int GCcondition;//触发GC的对象数量
 
@@ -78,6 +76,8 @@ private:
     void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
     void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
 public:
+    static u64 program;
+    u64 pc = 0;
     VM(StringPool& stringPool, ClassTable& classTable, StackFrameTable& stackFrameTable, SymbolTable& symbolTable, TypeTable& typeTable, IRs& irs, NativeTable& nativeTable,int GCcondition);
     void run();
     ~VM();

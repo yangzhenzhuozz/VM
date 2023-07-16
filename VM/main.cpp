@@ -11,7 +11,7 @@
 int main(int argc, char** argv)
 {
 	std::string baseDir = "";
-	int GCcondition = 10;
+	int GCcondition = 100;
 	for (auto i = 1; i < argc; i++)
 	{
 		if (strcmp(argv[i], "-GC") == 0)
@@ -38,6 +38,7 @@ int main(int argc, char** argv)
 	VM vm(stringPool, classTable, stackFrameTable, symbolTable, typeTable, irs, nativeTable, GCcondition);
 	try
 	{
+		std::cout << "GC的时候要考虑多线程，否则其他线程的数据会被GC掉" << std::endl;
 		vm.run();
 		return 0;
 	}

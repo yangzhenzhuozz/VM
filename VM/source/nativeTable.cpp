@@ -39,6 +39,10 @@ NativeTable::NativeTable(const char* filename, StringPool& stringPool)
         {
             system_loadLibrary = itemIndex;
         }
+        else if (strcmp("system_fork", stringPool.items[name]) == 0) 
+        {
+            system_fork = itemIndex;
+        }
         nativeMap[stringPool.items[name]] = itemIndex;
         itemIndex++;
         if (fin.tellg() == pos) {

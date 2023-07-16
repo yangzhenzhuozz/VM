@@ -1,25 +1,34 @@
 #include "../hpp/vm.hpp"
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <ffi.h>
+
+u64 VM::program;
+
+void forked(VM* vm, HeapItem* funObj)
+{
+	std::cout << "进入新线程" << std::endl;
+	vm->pc=funObj->text;
+	vm->run();
+}
 
 VM::VM(StringPool& stringPool, ClassTable& classTable, StackFrameTable& stackFrameTable, SymbolTable& symbolTable, TypeTable& typeTable, IRs& irs, NativeTable& nativeTable, int GCcondition) :
 	stringPool(stringPool),
-	nativeTable(nativeTable),
 	classTable(classTable),
 	stackFrameTable(stackFrameTable),
 	symbolTable(symbolTable),
 	typeTable(typeTable),
 	irs(irs),
+	nativeTable(nativeTable),
+	GCcondition(GCcondition),
 	varStack(Stack()),
 	calculateStack(Stack()),
 	callStack(Stack()),
 	unwindHandler(Stack()),
-	unwindNumStack(Stack()),
-	GCcondition(GCcondition)
+	unwindNumStack(Stack())
 {
 }
-
 void VM::_NativeCall(u64 NativeIndex)
 {
 	std::list<char*> argumentsBuffer;
@@ -74,6 +83,21 @@ void VM::_NativeCall(u64 NativeIndex)
 			delete[] functionName;
 		}
 		delete[] fileName;
+	}
+	else if (NativeIndex == nativeTable.system_fork)
+	{
+		auto it = argumentsBuffer.begin();
+		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
+		VM* newVM = new VM(
+			stringPool,
+			classTable,
+			stackFrameTable,
+			symbolTable,
+			typeTable,
+			irs,
+			nativeTable,
+			GCcondition);
+		std::thread newThread(forked, newVM, arg0);
 	}
 	else
 	{

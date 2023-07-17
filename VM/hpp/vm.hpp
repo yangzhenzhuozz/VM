@@ -13,73 +13,84 @@
 #include "./nativeTable.hpp"
 #include <stack>
 #include <list>
+#include <set>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 struct Catch_item
 {
-    u64 irAddress = 0;
-    u64 type = 0;
+	u64 irAddress = 0;
+	u64 type = 0;
 };
 class Catch_point
 {
 public:
-    std::list<Catch_item> type_list;//能捕获的异常类型表
-    u64 varBP = 0;
-    u64 varSP = 0;
-    u64 frameLevel = 0;
-    u64 callStackSP = 0;//函数调用栈
+	std::list<Catch_item> type_list;//能捕获的异常类型表
+	u64 varBP = 0;
+	u64 varSP = 0;
+	u64 frameLevel = 0;
+	u64 callStackSP = 0;//函数调用栈
 };
 struct FrameItem
 {
-    u64 frameSP;//当前栈帧的SP指针(不是varStack的SP)，用于记录已经分配了多少变量(以varStack的BP作为基地址)
-    u64 lastBP;//上一帧的BP
-    u64 frameIndex;//在frameTable的下标
-    u64 isTryBlock;//是否为tryFrame
+	u64 frameSP;//当前栈帧的SP指针(不是varStack的SP)，用于记录已经分配了多少变量(以varStack的BP作为基地址)
+	u64 lastBP;//上一帧的BP
+	u64 frameIndex;//在frameTable的下标
+	u64 isTryBlock;//是否为tryFrame
 };
 class VM
 {
 public:
-    StringPool& stringPool;
-    ClassTable& classTable;
-    StackFrameTable& stackFrameTable;
-    SymbolTable& symbolTable;
-    TypeTable& typeTable;
-    IRs& irs;
-    NativeTable& nativeTable;
+	static i32 gcCounter;//允许溢出，每次执行gc的时候，计数器+1
+	static  std::list<HeapItem*> heap;//因为要删除中间的对象，所以用list
+	static u64 program;
+	static int GCcondition;//触发GC的对象数量
+	static std::set<VM*> VMs;
 
-    Stack varStack;
-    Stack calculateStack;
-    Stack callStack;
-    std::list<FrameItem> frameStack;//因为需要遍历，所以用list完成stack的功能
-    Stack unwindHandler;//函数
-    Stack unwindNumStack;//当前需要回退的数量
+	static StringPool* stringPool;
+	static ClassTable* classTable;
+	static StackFrameTable* stackFrameTable;
+	static SymbolTable* symbolTable;
+	static TypeTable* typeTable;
+	static IRs* irs;
+	static NativeTable* nativeTable;
 
-    std::stack<Catch_point> catchStack;
+	void gc(bool force = false);
 
-    i32 gcCounter = 0;//允许溢出，每次执行gc的时候，计数器+1
-    std::list<HeapItem*> heap;//因为要删除中间的对象，所以用list
+	void run();
 
-    int GCcondition;//触发GC的对象数量
+	VM();
+	~VM();
 
-    bool VMError = false;
+	friend void forked(VM* vm, HeapItem* funObj);
 
-    u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);
-    void _throw(u64 type);
-    void _VMThrowError(u64 type, u64 init, u64 constructor);
-    void pop_stack_map(u64 level, bool isThrowPopup);
-    void _new(u64 type);
-    void _NativeCall(u64 index);
-    void gc(bool force = false);
-    void GCRootsSearch(std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象
-    bool mark(std::list<HeapItem*>& GCRoots,HeapItem* pointer);
-    void sweep();//清除garbage
-    void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
-    void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
+private:
 
-    static u64 program;
-    u64 pc = 0;
-    VM(StringPool& stringPool, ClassTable& classTable, StackFrameTable& stackFrameTable, SymbolTable& symbolTable, TypeTable& typeTable, IRs& irs, NativeTable& nativeTable,int GCcondition);
-    void run();
-    ~VM();
+	Stack varStack;
+	Stack calculateStack;
+	Stack callStack;
+	std::list<FrameItem> frameStack;//因为需要遍历，所以用list完成stack的功能
+	Stack unwindHandler;//函数
+	Stack unwindNumStack;//当前需要回退的数量
+
+	std::stack<Catch_point> catchStack;
+
+	u64 pc = 0;
+
+
+	bool VMError = false;
+
+	u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);
+	void _throw(u64 type);
+	void _VMThrowError(u64 type, u64 init, u64 constructor);
+	void pop_stack_map(u64 level, bool isThrowPopup);
+	void _new(u64 type);
+	void _NativeCall(u64 index);
+
+	static void GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,会标记所有能访问到的对象
+	static void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
+	static void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
+	static bool mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//用于操作一个可达对象，将可达对象的gc计数器设置为当前的gcCounter
+	static void sweep();//清除garbage
+
 };
 #endif

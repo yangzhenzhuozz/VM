@@ -11,13 +11,12 @@
 int main(int argc, char** argv)
 {
 	std::string baseDir = "";
-	int GCcondition = 100;
 	for (auto i = 1; i < argc; i++)
 	{
 		if (strcmp(argv[i], "-GC") == 0)
 		{
 			i++;
-			sscanf(argv[i], "%d", &GCcondition);
+			sscanf(argv[i], "%d", &VM::GCcondition);
 		}
 		else
 		{
@@ -29,16 +28,24 @@ int main(int argc, char** argv)
 		baseDir = "./";
 	}
 	StringPool stringPool((baseDir + "stringPool.bin").c_str());
+
 	NativeTable nativeTable((baseDir + "nativeTable.bin").c_str(), stringPool);
 	ClassTable classTable((baseDir + "classTable.bin").c_str(), stringPool);
 	StackFrameTable stackFrameTable((baseDir + "stackFrameTable.bin").c_str());
 	SymbolTable symbolTable((baseDir + "irTable.bin").c_str());
 	TypeTable typeTable((baseDir + "typeTable.bin").c_str(), stringPool);
 	IRs irs((baseDir + "text.bin").c_str());
-	VM vm(stringPool, classTable, stackFrameTable, symbolTable, typeTable, irs, nativeTable, GCcondition);
+	VM::stringPool = &stringPool;
+	VM::classTable = &classTable;
+	VM::stackFrameTable = &stackFrameTable;
+	VM::symbolTable = &symbolTable;
+	VM::typeTable = &typeTable;
+	VM::irs = &irs;
+	VM::nativeTable = &nativeTable;
+
+	VM vm;
 	try
 	{
-		std::cout << "GC的时候要考虑多线程，否则其他线程的数据会被GC掉" << std::endl;
 		vm.run();
 		return 0;
 	}

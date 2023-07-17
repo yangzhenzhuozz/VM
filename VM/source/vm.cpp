@@ -5,43 +5,48 @@
 #include <ffi.h>
 
 u64 VM::program;
+std::list<HeapItem*> VM::heap;
+i32 VM::gcCounter = 0;
+int VM::GCcondition = 100;
+std::set<VM*> VM::VMs;
+
+StringPool* VM::stringPool;
+ClassTable* VM::classTable;
+StackFrameTable* VM::stackFrameTable;
+SymbolTable* VM::symbolTable;
+TypeTable* VM::typeTable;
+IRs* VM::irs;
+NativeTable* VM::nativeTable;
 
 void forked(VM* vm, HeapItem* funObj)
 {
-	std::cout << "进入新线程" << std::endl;
-	vm->pc=funObj->text;
- vm->calculateStack.push((u64)((u64*)funObj->data));
+	std::cout << "新创建的线程应该被管理才行" << std::endl;
+	vm->pc = funObj->text;
+	vm->calculateStack.push((u64)((u64*)funObj->data));
 	vm->run();
 }
 
-VM::VM(StringPool& stringPool, ClassTable& classTable, StackFrameTable& stackFrameTable, SymbolTable& symbolTable, TypeTable& typeTable, IRs& irs, NativeTable& nativeTable, int GCcondition) :
-	stringPool(stringPool),
-	classTable(classTable),
-	stackFrameTable(stackFrameTable),
-	symbolTable(symbolTable),
-	typeTable(typeTable),
-	irs(irs),
-	nativeTable(nativeTable),
-	GCcondition(GCcondition),
+VM::VM() :
 	varStack(Stack()),
 	calculateStack(Stack()),
 	callStack(Stack()),
 	unwindHandler(Stack()),
 	unwindNumStack(Stack())
 {
+	VMs.insert(this);
 }
 void VM::_NativeCall(u64 NativeIndex)
 {
 	std::list<char*> argumentsBuffer;
-	u64 resultSize = nativeTable.items[NativeIndex].retSize;
+	u64 resultSize = nativeTable->items[NativeIndex].retSize;
 	char errMsg[1024];
 	char* resultBuffer = new char[resultSize];
 	memset(resultBuffer, 0, resultSize);
-	auto argLen = nativeTable.items[NativeIndex].argList.size();//参数个数
+	auto argLen = nativeTable->items[NativeIndex].argList.size();//参数个数
 	//从计算栈中弹出参数
 	for (u64 i = 0; i < argLen; i++)
 	{
-		u64 argSize = nativeTable.items[NativeIndex].argList[i].size;
+		u64 argSize = nativeTable->items[NativeIndex].argList[i].size;
 		char* argBuf = new char[argSize];
 		argumentsBuffer.push_back(argBuf);
 		auto top = calculateStack.getSP();
@@ -49,7 +54,7 @@ void VM::_NativeCall(u64 NativeIndex)
 		calculateStack.setSP(calculateStack.getSP() - argSize);
 	}
 
-	if (NativeIndex == nativeTable.system_loadLibrary)
+	if (NativeIndex == nativeTable->system_loadLibrary)
 	{
 		auto it = argumentsBuffer.begin();
 		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
@@ -77,34 +82,27 @@ void VM::_NativeCall(u64 NativeIndex)
 				snprintf(errMsg, sizeof(errMsg), "加载函数:%s 失败", functionName);;
 				throw errMsg;
 			}
-			if (nativeTable.nativeMap.count(functionName) != 0)//如果这个函数在源码中有定义
+			if (nativeTable->nativeMap.count(functionName) != 0)//如果这个函数在源码中有定义
 			{
-				nativeTable.items[nativeTable.nativeMap[functionName]].realAddress = (u64)functionPointer;
+				nativeTable->items[nativeTable->nativeMap[functionName]].realAddress = (u64)functionPointer;
 			}
 			delete[] functionName;
 		}
 		delete[] fileName;
 	}
-	else if (NativeIndex == nativeTable.system_fork)
+	else if (NativeIndex == nativeTable->system_fork)
 	{
 		auto it = argumentsBuffer.begin();
 		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
-		VM* newVM = new VM(
-			stringPool,
-			classTable,
-			stackFrameTable,
-			symbolTable,
-			typeTable,
-			irs,
-			nativeTable,
-			GCcondition);
+		VM* newVM = new VM();
 		std::thread newThread(forked, newVM, arg0);
+		newThread.detach();//分离新线程
 	}
 	else
 	{
-		if (nativeTable.items[NativeIndex].realAddress == 0)
+		if (nativeTable->items[NativeIndex].realAddress == 0)
 		{
-			snprintf(errMsg, sizeof(errMsg), "本地函数:%s 不存在,请检查是否已经使用VMLoadNativeLib函数加载对应的动态链接库", stringPool.items[nativeTable.items[NativeIndex].name]);;
+			snprintf(errMsg, sizeof(errMsg), "本地函数:%s 不存在,请检查是否已经使用VMLoadNativeLib函数加载对应的动态链接库", stringPool->items[nativeTable->items[NativeIndex].name]);;
 			throw errMsg;
 		}
 		else
@@ -116,7 +114,7 @@ void VM::_NativeCall(u64 NativeIndex)
 			{
 				args[argInex] = (*it);//放置参数地址
 				argTyeps[argInex] = new ffi_type;
-				(*(argTyeps[argInex])).size = nativeTable.items[NativeIndex].argList[argInex].size;//参数大小
+				(*(argTyeps[argInex])).size = nativeTable->items[NativeIndex].argList[argInex].size;//参数大小
 				(*(argTyeps[argInex])).alignment = 1;//对齐
 				(*(argTyeps[argInex])).type = FFI_TYPE_STRUCT;//按结构体传参
 				(*(argTyeps[argInex])).elements = nullptr;//没有元素
@@ -141,7 +139,7 @@ void VM::_NativeCall(u64 NativeIndex)
 			ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen, &retType, argTyeps);
 
 			//使用cif函数签名信息，调用函数
-			ffi_call(&cif, (void (*)(void)) nativeTable.items[NativeIndex].realAddress, resultBuffer, (void**)args);
+			ffi_call(&cif, (void (*)(void)) nativeTable->items[NativeIndex].realAddress, resultBuffer, (void**)args);
 
 
 			//释放为ffi参数类型描述符申请的内存
@@ -165,7 +163,7 @@ void VM::_NativeCall(u64 NativeIndex)
 		delete[] * it;
 	}
 	//如果返回的是一个引用类型，则将其录入heap中，否则释放内存
-	if (nativeTable.items[NativeIndex].resultIsValueType != 1)
+	if (nativeTable->items[NativeIndex].resultIsValueType != 1)
 	{
 		((HeapItem*)resultBuffer)->gcMark = gcCounter - 1;
 		heap.push_back((HeapItem*)resultBuffer);
@@ -183,19 +181,19 @@ void VM::_NativeCall(u64 NativeIndex)
 u64 VM::newArray(u64 arrayType, u32* param, u64 paramLen, u64 level)
 {
 	HeapItem* heapitem = nullptr;
-	auto& typeDesc = typeTable.items[arrayType];
+	auto& typeDesc = typeTable->items[arrayType];
 	auto elementType = typeDesc.innerType;
 	//如果元素是值类型
-	if (typeTable.items[elementType].desc == typeItemDesc::PlaintObj && classTable.items[typeTable.items[elementType].innerType]->isVALUE != 0)
+	if (typeTable->items[elementType].desc == typeItemDesc::PlaintObj && classTable->items[typeTable->items[elementType].innerType]->isVALUE != 0)
 	{
-		heapitem = (HeapItem*) new char[sizeof(HeapItem) + classTable.items[typeTable.items[elementType].innerType]->size * param[level]];
-		memset(heapitem->data, 0, classTable.items[typeTable.items[elementType].innerType]->size * param[level]);
+		heapitem = (HeapItem*) new char[sizeof(HeapItem) + classTable->items[typeTable->items[elementType].innerType]->size * param[level]];
+		memset(heapitem->data, 0, classTable->items[typeTable->items[elementType].innerType]->size * param[level]);
 	}
 	else
 	{
 		heapitem = (HeapItem*)new char[sizeof(HeapItem) + sizeof(u64) * param[level]];
 		//如果元素不是数组，则全部作为指针处理
-		if (typeTable.items[elementType].desc != typeItemDesc::Array)
+		if (typeTable->items[elementType].desc != typeItemDesc::Array)
 		{
 			memset(heapitem->data, 0, sizeof(u64) * param[level]);
 		}
@@ -242,24 +240,24 @@ void VM::pop_stack_map(u64 level, bool isThrowPopup)
 
 		auto frameIndex = frameItem.frameIndex;//frame
 
-		auto& frame = stackFrameTable.items[frameIndex];
+		auto& frame = stackFrameTable->items[frameIndex];
 		//需要回退栈，判断当前已经分配了多少变量(比如异常就可能导致变量还未分配和初始化,把已经初始化的并且需要自动回退的变量处理掉)
 		if (frame->autoUnwinding > 0)
 		{
-			auto varStackoffset = stackFrameTable.items[frameItem.frameIndex]->baseOffset;
+			auto varStackoffset = stackFrameTable->items[frameItem.frameIndex]->baseOffset;
 			auto needUnwinded = 0;//计算需要弹出多少个unwind
 			u64 unwindNum = 0;
 			for (auto i = 0; i < frame->autoUnwinding; i++)
 			{
 				u64 size = 0;
 				//如果是引用类型，则size等于8
-				if (!classTable.items[typeTable.items[frame->items[i].type].innerType]->isVALUE)
+				if (!classTable->items[typeTable->items[frame->items[i].type].innerType]->isVALUE)
 				{
 					size = 8;
 				}
 				else
 				{
-					size = classTable.items[typeTable.items[frame->items[i].type].innerType]->size;
+					size = classTable->items[typeTable->items[frame->items[i].type].innerType]->size;
 				}
 
 				if (varStackoffset < frameItem.frameSP)
@@ -277,13 +275,13 @@ void VM::pop_stack_map(u64 level, bool isThrowPopup)
 				unwindNumStack.push(unwindNum);
 				//开始执行@unwind
 				callStack.push(pc);
-				pc = irs._unwind - 1;
+				pc = irs->_unwind - 1;
 				varStack.setBP(varStack.getSP());
 			}
 		}
 
 		varStack.setBP(frameItem.lastBP);//回退BP
-		varStack.setSP(varStack.getSP() - stackFrameTable.items[frameItem.frameIndex]->size);//回退上一帧的SP
+		varStack.setSP(varStack.getSP() - stackFrameTable->items[frameItem.frameIndex]->size);//回退上一帧的SP
 
 	}
 }
@@ -291,10 +289,10 @@ void VM::pop_stack_map(u64 level, bool isThrowPopup)
 void VM::_new(u64 type)
 {
 	auto typeIndex = type;
-	auto& typeDesc = typeTable.items[typeIndex];
+	auto& typeDesc = typeTable->items[typeIndex];
 	auto  name = typeDesc.name;
-	auto dataSize = classTable.items[typeDesc.innerType]->size;
-	if (classTable.items[typeDesc.innerType]->isVALUE == 0)
+	auto dataSize = classTable->items[typeDesc.innerType]->size;
+	if (classTable->items[typeDesc.innerType]->isVALUE == 0)
 	{
 		HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
 		memset(heapitem->data, 0, dataSize);
@@ -318,7 +316,7 @@ void VM::_throw(u64 type)
 		if (catchStack.empty())
 		{
 			char msgdBuf[1024];
-			snprintf(msgdBuf, sizeof(msgdBuf), "unfind catch block match the type : %s", stringPool.items[typeTable.items[type].name]);//vm级别错误
+			snprintf(msgdBuf, sizeof(msgdBuf), "unfind catch block match the type : %s", stringPool->items[typeTable->items[type].name]);//vm级别错误
 			throw msgdBuf;
 		}
 		Catch_point catch_point = catchStack.top();
@@ -346,15 +344,15 @@ void VM::_VMThrowError(u64 type, u64 init, u64 constructor)
 	calculateStack.setSP(0);//清空计算栈
 	_new(type);//为空指针异常对象申请内存
 
-	callStack.push(irs.VMThrow - 1);//使异常构造函数结束之后返回到VMThrow
+	callStack.push(irs->VMThrow - 1);//使异常构造函数结束之后返回到VMThrow
 	varStack.setBP(varStack.getSP());
 
-	pc = irs.VMExceptionGen - 1;
+	pc = irs->VMExceptionGen - 1;
 
-	irs.items[irs.VMExceptionGen].operand1 = init;//修改ir，使其调用init
-	irs.items[irs.VMExceptionGen + 1].operand1 = constructor;//修改ir，使其调用构造函数
+	irs->items[irs->VMExceptionGen].operand1 = init;//修改ir，使其调用init
+	irs->items[irs->VMExceptionGen + 1].operand1 = constructor;//修改ir，使其调用构造函数
 
-	irs.items[irs.VMThrow + 2].operand1 = type;//正确的抛出空指针异常
+	irs->items[irs->VMThrow + 2].operand1 = type;//正确的抛出空指针异常
 
 	VMError = true;
 }
@@ -366,9 +364,9 @@ void VM::run()
 	* 这里指的都是VM自身产生的异常，用户代码产生的异常不在此列
 	*/
 	try {
-		for (; pc < irs.length; pc++)
+		for (; pc < irs->length; pc++)
 		{
-			auto& ir = irs.items[pc];
+			auto& ir = irs->items[pc];
 			switch (ir.opcode)
 			{
 			case OPCODE::_new:
@@ -379,9 +377,9 @@ void VM::run()
 			case OPCODE::newFunc:
 			{
 				auto wrapIndex = ir.operand3;
-				auto& typeDesc = typeTable.items[wrapIndex];
+				auto& typeDesc = typeTable->items[wrapIndex];
 				auto name = typeDesc.name;
-				auto dataSize = classTable.items[typeDesc.innerType]->size;
+				auto dataSize = classTable->items[typeDesc.innerType]->size;
 				HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
 				memset(heapitem->data, 0, dataSize);
 				heapitem->typeDesc = typeDesc;
@@ -422,7 +420,7 @@ void VM::run()
 				u64 baseObj = calculateStack.pop64();
 				if (baseObj == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -436,7 +434,7 @@ void VM::run()
 				u64 targetObj = calculateStack.pop64();
 				if (targetObj == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -552,7 +550,7 @@ void VM::run()
 				i8 v1 = calculateStack.pop8();
 				if (v2 == 0)
 				{
-					_VMThrowError(typeTable.system_exception_ArithmeticException, irs.ArithmeticException_init, irs.ArithmeticException_constructor);
+					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 				}
 				else
 				{
@@ -656,7 +654,7 @@ void VM::run()
 				i16 v1 = calculateStack.pop16();
 				if (v2 == 0)
 				{
-					_VMThrowError(typeTable.system_exception_ArithmeticException, irs.ArithmeticException_init, irs.ArithmeticException_constructor);
+					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 				}
 				else
 				{
@@ -760,7 +758,7 @@ void VM::run()
 				i32 v1 = calculateStack.pop32();
 				if (v2 == 0)
 				{
-					_VMThrowError(typeTable.system_exception_ArithmeticException, irs.ArithmeticException_init, irs.ArithmeticException_constructor);
+					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 				}
 				else
 				{
@@ -864,7 +862,7 @@ void VM::run()
 				i64 v1 = calculateStack.pop64();
 				if (v2 == 0)
 				{
-					_VMThrowError(typeTable.system_exception_ArithmeticException, irs.ArithmeticException_init, irs.ArithmeticException_constructor);
+					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 				}
 				else
 				{
@@ -1312,7 +1310,7 @@ void VM::run()
 				auto functionObj = calculateStack.top64();
 				if (functionObj == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -1324,11 +1322,6 @@ void VM::run()
 					}
 					pc = heapItem->text - 1;
 				}
-			}
-			break;
-			case OPCODE::ret:
-			{
-				pc = callStack.pop64();
 			}
 			break;
 			case OPCODE::alloc:
@@ -1378,7 +1371,7 @@ void VM::run()
 				u64 baseObj = calculateStack.pop64();
 				if (baseObj == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -1393,7 +1386,7 @@ void VM::run()
 				u64 targetObj = calculateStack.pop64();
 				if (targetObj == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -1406,7 +1399,7 @@ void VM::run()
 				auto baseAdd = calculateStack.pop64();
 				if (baseAdd == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -1426,14 +1419,14 @@ void VM::run()
 				auto arrayAddress = calculateStack.pop64();
 				if (arrayAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
 					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
 					if (index >= heapitem->sol.length)
 					{
-						_VMThrowError(typeTable.system_exception_ArrayIndexOutOfBoundsException, irs.ArrayIndexOutOfBoundsException_init, irs.ArrayIndexOutOfBoundsException_constructor);
+						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 					}
 					else
 					{
@@ -1448,14 +1441,14 @@ void VM::run()
 				auto arrayAddress = calculateStack.pop64();
 				if (arrayAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
 					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
 					if (index >= heapitem->sol.length)
 					{
-						_VMThrowError(typeTable.system_exception_ArrayIndexOutOfBoundsException, irs.ArrayIndexOutOfBoundsException_init, irs.ArrayIndexOutOfBoundsException_constructor);
+						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 					}
 					else
 					{
@@ -1471,14 +1464,14 @@ void VM::run()
 				auto arrayAddress = calculateStack.pop64();
 				if (arrayAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
 					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
 					if (index >= heapitem->sol.length)
 					{
-						_VMThrowError(typeTable.system_exception_ArrayIndexOutOfBoundsException, irs.ArrayIndexOutOfBoundsException_init, irs.ArrayIndexOutOfBoundsException_constructor);
+						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 					}
 					else
 					{
@@ -1495,14 +1488,14 @@ void VM::run()
 				auto arrayAddress = calculateStack.pop64();
 				if (arrayAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
 					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
 					if (index >= heapitem->sol.length)
 					{
-						_VMThrowError(typeTable.system_exception_ArrayIndexOutOfBoundsException, irs.ArrayIndexOutOfBoundsException_init, irs.ArrayIndexOutOfBoundsException_constructor);
+						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 					}
 					else
 					{
@@ -1519,14 +1512,14 @@ void VM::run()
 				auto arrayAddress = calculateStack.pop64();
 				if (arrayAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
 					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
 					if (index >= heapitem->sol.length)
 					{
-						_VMThrowError(typeTable.system_exception_ArrayIndexOutOfBoundsException, irs.ArrayIndexOutOfBoundsException_init, irs.ArrayIndexOutOfBoundsException_constructor);
+						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 					}
 					else
 					{
@@ -1540,7 +1533,7 @@ void VM::run()
 				auto arrayAddress = calculateStack.pop64();
 				if (arrayAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
@@ -1552,10 +1545,10 @@ void VM::run()
 			case OPCODE::box:
 			{
 				auto typeIndex = ir.operand1;
-				auto& typeDesc = typeTable.items[typeIndex];
+				auto& typeDesc = typeTable->items[typeIndex];
 				auto  name = typeDesc.name;
-				auto dataSize = classTable.items[typeDesc.innerType]->size;
-				if (classTable.items[typeDesc.innerType]->isVALUE != 0)
+				auto dataSize = classTable->items[typeDesc.innerType]->size;
+				if (classTable->items[typeDesc.innerType]->isVALUE != 0)
 				{
 					HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
 					auto src = (char*)(calculateStack.getBufferAddress() + calculateStack.getSP() - dataSize);
@@ -1579,10 +1572,10 @@ void VM::run()
 			{
 				HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
 				TypeItem& srcTypeDesc = (*heapItem).typeDesc;
-				TypeItem& targetTypeDesc = typeTable.items[ir.operand1];
+				TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
 				if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
 				{
-					_VMThrowError(typeTable.system_exception_CastException, irs.CastException_init, irs.CastException_constructor);
+					_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
 				}
 				else
 				{
@@ -1594,7 +1587,7 @@ void VM::run()
 			{
 				HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
 				TypeItem& srcTypeDesc = (*heapItem).typeDesc;
-				TypeItem& targetTypeDesc = typeTable.items[ir.operand1];
+				TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
 				if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
 				{
 					calculateStack.push((i8)0);
@@ -1610,15 +1603,15 @@ void VM::run()
 				auto objAddress = calculateStack.top64();
 				if (objAddress == 0)
 				{
-					_VMThrowError(typeTable.system_exception_NullPointerException, irs.NullPointerException_init, irs.NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 				}
 				else
 				{
 					TypeItem& srcTypeDesc = (*(HeapItem*)(objAddress - sizeof(HeapItem))).typeDesc;
-					TypeItem& targetTypeDesc = typeTable.items[ir.operand1];
+					TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
 					if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
 					{
-						_VMThrowError(typeTable.system_exception_CastException, irs.CastException_init, irs.CastException_constructor);
+						_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
 					}
 				}
 			}
@@ -1652,17 +1645,17 @@ void VM::run()
 			case OPCODE::push_stack_map:
 			{
 				FrameItem item = { 0 };
-				item.frameSP = stackFrameTable.items[ir.operand1]->baseOffset;
+				item.frameSP = stackFrameTable->items[ir.operand1]->baseOffset;
 				item.lastBP = varStack.getBP();
 				item.frameIndex = ir.operand1;
-				item.isTryBlock = stackFrameTable.items[ir.operand1]->isTryBlock;
+				item.isTryBlock = stackFrameTable->items[ir.operand1]->isTryBlock;
 				//如果是函数block，则更新bp
-				if (stackFrameTable.items[ir.operand1]->isFunctionBlock)
+				if (stackFrameTable->items[ir.operand1]->isFunctionBlock)
 				{
 					varStack.setBP(varStack.getSP());
 				}
 				//申请变量空间
-				varStack.setSP(varStack.getSP() + stackFrameTable.items[ir.operand1]->size);
+				varStack.setSP(varStack.getSP() + stackFrameTable->items[ir.operand1]->size);
 
 				frameStack.push_back(item);
 			}
@@ -1745,12 +1738,26 @@ void VM::run()
 				calculateStack.push(error);
 			}
 			break;
-
+			case OPCODE::ret:
+			{
+				if (callStack.getBP() == 0 && callStack.getSP() == 0)
+				{
+					gc(true);
+					goto __exit;
+				}
+				else
+				{
+					pc = callStack.pop64();
+				}
+			}
+			break;
 			case OPCODE::__exit:
+			{
 				program = 0x00;
 				gc(true);
 				goto __exit;
-				break;
+			}
+			break;
 
 			default:
 			{
@@ -1795,10 +1802,10 @@ __exit:
 	{
 		throw "栈不平衡";
 	}
-	if (!heap.empty())
-	{
-		throw "GC没有回收全部对象";
-	}
+	//if (!heap.empty())
+	//{
+	//	throw "GC没有回收全部对象";
+	//}
 }
 
 void VM::sweep()
@@ -1828,26 +1835,26 @@ void VM::GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64
 {
 	//如果被扫描的类型是系统内置值类型，则不再扫描(除了object)
 	if (
-		classIndex == classTable.system_bool ||
-		classIndex == classTable.system_byte ||
-		classIndex == classTable.system_short ||
-		classIndex == classTable.system_int ||
-		classIndex == classTable.system_long ||
-		classIndex == classTable.system_double
+		classIndex == classTable->system_bool ||
+		classIndex == classTable->system_byte ||
+		classIndex == classTable->system_short ||
+		classIndex == classTable->system_int ||
+		classIndex == classTable->system_long ||
+		classIndex == classTable->system_double
 		)
 	{
 		return;
 	}
 	//遍历对象的所有属性
 	u64 fieldOffset = 0;
-	for (auto fieldIndex = 0; fieldIndex < classTable.items[classIndex]->length; fieldIndex++) {
-		u64 fieldTypeTableIndex = classTable.items[classIndex]->items[fieldIndex].type;
-		TypeItem& fieldTypeDesc = typeTable.items[fieldTypeTableIndex];
+	for (auto fieldIndex = 0; fieldIndex < classTable->items[classIndex]->length; fieldIndex++) {
+		u64 fieldTypeTableIndex = classTable->items[classIndex]->items[fieldIndex].type;
+		TypeItem& fieldTypeDesc = typeTable->items[fieldTypeTableIndex];
 		if (fieldTypeDesc.desc == typeItemDesc::PlaintObj)//是class
 		{
-			if (classTable.items[fieldTypeDesc.innerType]->isVALUE)//是值类型
+			if (classTable->items[fieldTypeDesc.innerType]->isVALUE)//是值类型
 			{
-				if (fieldTypeTableIndex == typeTable.system_object)//如果是object，则把他当作引用对待
+				if (fieldTypeTableIndex == typeTable->system_object)//如果是object，则把他当作引用对待
 				{
 					u64 obj = *((u64*)(dataAddress + fieldOffset));
 					if (obj != 0)//不是null
@@ -1863,7 +1870,7 @@ void VM::GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64
 				{
 					GCClassFieldAnalyze(GCRoots, dataAddress + fieldOffset, fieldTypeDesc.innerType);
 				}
-				fieldOffset += classTable.items[fieldTypeDesc.innerType]->size;//偏移增加
+				fieldOffset += classTable->items[fieldTypeDesc.innerType]->size;//偏移增加
 			}
 			else//是引用类型
 			{
@@ -1911,15 +1918,15 @@ void VM::GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64
 void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 {
 	HeapItem* array = (HeapItem*)(dataAddress - sizeof(HeapItem));
-	TypeItem elementTypeDesc = typeTable.items[array->typeDesc.innerType];//获取元素类型
+	TypeItem elementTypeDesc = typeTable->items[array->typeDesc.innerType];//获取元素类型
 	for (auto index = 0; index < array->sol.length; index++)//遍历数组每一项
 	{
 		if (elementTypeDesc.desc == typeItemDesc::PlaintObj)//数组元素是class
 		{
-			auto classDesc = classTable.items[elementTypeDesc.innerType];
+			auto classDesc = classTable->items[elementTypeDesc.innerType];
 			if (classDesc->isVALUE)//元素是值类型
 			{
-				if (elementTypeDesc.innerType == classTable.system_object)//是object类型
+				if (elementTypeDesc.innerType == classTable->system_object)//是object类型
 				{
 					u64 obj = *((u64*)(dataAddress + classDesc->size * index));
 					if (obj != 0)
@@ -1971,23 +1978,14 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 	}
 }
 //使用广度优先搜索标记对象
-void VM::GCRootsSearch(std::list<HeapItem*>& GCRoots)
+void VM::GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots)
 {
-	gcCounter++;
-	if (program != 0)
-	{
-		if (mark(GCRoots, (HeapItem*)(program - sizeof(HeapItem))))
-		{
-			auto realType = ((HeapItem*)(program - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
-			GCClassFieldAnalyze(GCRoots, program, realType);
-		}
-	}
-	u64 bp = varStack.getBP();
-	for (auto it = frameStack.rbegin(); it != frameStack.rend(); it++)//逆序遍历
+	u64 bp = vm.varStack.getBP();
+	for (auto it = vm.frameStack.rbegin(); it != vm.frameStack.rend(); it++)//逆序遍历
 	{
 		//把变量栈中所有指针放入GCRoot
 		FrameItem frameItem = *it;
-		auto& frame = stackFrameTable.items[frameItem.frameIndex];
+		auto& frame = vm.stackFrameTable->items[frameItem.frameIndex];
 		auto varAddress = frame->baseOffset;
 		for (auto i = 0; ; i++)
 		{
@@ -1996,14 +1994,14 @@ void VM::GCRootsSearch(std::list<HeapItem*>& GCRoots)
 				break;
 			}
 			//如果是引用类型，则size等于8
-			auto typeDesc = typeTable.items[frame->items[i].type];
+			auto typeDesc = vm.typeTable->items[frame->items[i].type];
 			if (typeDesc.desc == typeItemDesc::PlaintObj)
 			{
-				if (classTable.items[typeDesc.innerType]->isVALUE)//是值类型
+				if (vm.classTable->items[typeDesc.innerType]->isVALUE)//是值类型
 				{
-					if (frame->items[i].type == typeTable.system_object)//如果是object，则把他当作引用对待
+					if (frame->items[i].type == vm.typeTable->system_object)//如果是object，则把他当作引用对待
 					{
-						u64 obj = *((u64*)((u64)varStack.getBufferAddress() + bp + varAddress));
+						u64 obj = *((u64*)((u64)vm.varStack.getBufferAddress() + bp + varAddress));
 						if (obj != 0)//不是null
 						{
 							if (mark(GCRoots, (HeapItem*)(obj - sizeof(HeapItem))))
@@ -2015,13 +2013,13 @@ void VM::GCRootsSearch(std::list<HeapItem*>& GCRoots)
 					}
 					else
 					{
-						GCClassFieldAnalyze(GCRoots, (u64)varStack.getBufferAddress() + bp + varAddress, typeDesc.innerType);
+						GCClassFieldAnalyze(GCRoots, (u64)vm.varStack.getBufferAddress() + bp + varAddress, typeDesc.innerType);
 					}
-					varAddress += classTable.items[typeDesc.innerType]->size;//偏移增加
+					varAddress += vm.classTable->items[typeDesc.innerType]->size;//偏移增加
 				}
 				else
 				{
-					u64 obj = *((u64*)((u64)varStack.getBufferAddress() + bp + varAddress));
+					u64 obj = *((u64*)((u64)vm.varStack.getBufferAddress() + bp + varAddress));
 					if (obj != 0)//不是null
 					{
 						if (mark(GCRoots, (HeapItem*)(obj - sizeof(HeapItem))))
@@ -2034,7 +2032,7 @@ void VM::GCRootsSearch(std::list<HeapItem*>& GCRoots)
 			}
 			else if (typeDesc.desc == typeItemDesc::Array)
 			{
-				u64 arr = *((u64*)((u64)varStack.getBufferAddress() + bp + varAddress));
+				u64 arr = *((u64*)((u64)vm.varStack.getBufferAddress() + bp + varAddress));
 				if (arr != 0) //数组不是null
 				{
 					if (mark(GCRoots, (HeapItem*)(arr - sizeof(HeapItem))))
@@ -2046,7 +2044,7 @@ void VM::GCRootsSearch(std::list<HeapItem*>& GCRoots)
 			}
 			else//元素是函数类型
 			{
-				u64 obj = *((u64*)((u64)varStack.getBufferAddress() + bp + varAddress));
+				u64 obj = *((u64*)((u64)vm.varStack.getBufferAddress() + bp + varAddress));
 				if (obj != 0)//不是null
 				{
 					if (mark(GCRoots, (HeapItem*)(obj - sizeof(HeapItem))))
@@ -2076,15 +2074,29 @@ bool VM::mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 }
 void VM::gc(bool force)
 {
+	std::cout << "同一时刻只允许一个线程GC，而且要求所有线程都进入安全区" << std::endl;
 	//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
 	if (heap.size() < GCcondition && !force)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 	{
 		return;
 	}
 	std::list<HeapItem*> GCRoots;
-	GCRootsSearch(GCRoots);
+	/*下面的代码先标记program，然后对当前VM的变量栈进行分析*/
+	gcCounter++;
+	if (program != 0)
+	{
+		if (mark(GCRoots, (HeapItem*)(program - sizeof(HeapItem))))
+		{
+			auto realType = ((HeapItem*)(program - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
+			GCClassFieldAnalyze(GCRoots, program, realType);
+		}
+	}
+	for (auto it = VMs.begin(); it != VMs.end(); it++) {
+		GCRootsSearch(**it, GCRoots);
+	}
 	sweep();
 }
 VM::~VM()
 {
+	VMs.erase(this);
 }

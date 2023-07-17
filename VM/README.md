@@ -9,3 +9,4 @@
 1. 执行"vcpkg integrate install"使vcpkg的包集成到全局[参考链接](https://www.bilibili.com/read/cv15439255/)
 1. 执行"vcpkg install libffi --triplet x64-windows"安装libffi
 1. 把VM设置为启动项目,为其添加启动参数xxx,这里的xxx是tyc编译出来的output目录,即可运行
+*经过实测，这种方式依赖的dll文件有问题，需要手工把/bin/libffi.dll替换掉vcpkg自动导入的文件才行*

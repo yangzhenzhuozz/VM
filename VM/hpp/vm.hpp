@@ -38,7 +38,7 @@ struct FrameItem
 };
 class VM
 {
-private:
+public:
     StringPool& stringPool;
     ClassTable& classTable;
     StackFrameTable& stackFrameTable;
@@ -75,7 +75,7 @@ private:
     void sweep();//清除garbage
     void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
     void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
-public:
+
     static u64 program;
     u64 pc = 0;
     VM(StringPool& stringPool, ClassTable& classTable, StackFrameTable& stackFrameTable, SymbolTable& symbolTable, TypeTable& typeTable, IRs& irs, NativeTable& nativeTable,int GCcondition);

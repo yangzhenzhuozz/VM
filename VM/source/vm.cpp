@@ -10,6 +10,7 @@ void forked(VM* vm, HeapItem* funObj)
 {
 	std::cout << "进入新线程" << std::endl;
 	vm->pc=funObj->text;
+ vm->calculateStack.push((u64)((u64*)funObj->data));
 	vm->run();
 }
 

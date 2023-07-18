@@ -46,6 +46,7 @@ int main(int argc, char** argv)
 	VM vm;
 	try
 	{
+		std::thread gcThread(VM::gc);//启动GC线程
 		vm.run();
 		return 0;
 	}

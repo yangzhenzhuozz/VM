@@ -2,13 +2,15 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <chrono>
 #include <ffi.h>
 
 u64 VM::program;
 std::list<HeapItem*> VM::heap;
 i32 VM::gcCounter = 0;
-int VM::GCcondition = 100;
+int VM::GCcondition = 0;
 std::set<VM*> VM::VMs;
+std::mutex VM::waitGC;
 
 StringPool* VM::stringPool;
 ClassTable* VM::classTable;
@@ -18,12 +20,15 @@ TypeTable* VM::typeTable;
 IRs* VM::irs;
 NativeTable* VM::nativeTable;
 
-void forked(VM* vm, HeapItem* funObj)
+void forked(HeapItem* funObj)
 {
-	std::cout << "新创建的线程应该被管理才行" << std::endl;
-	vm->pc = funObj->text;
-	vm->calculateStack.push((u64)((u64*)funObj->data));
-	vm->run();
+	/*
+	* fork的参数会被GC回收掉
+	*/
+	VM vm;
+	vm.pc = funObj->text;
+	vm.calculateStack.push((u64)((u64*)funObj->data));
+	vm.run();
 }
 
 VM::VM() :
@@ -94,8 +99,7 @@ void VM::_NativeCall(u64 NativeIndex)
 	{
 		auto it = argumentsBuffer.begin();
 		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
-		VM* newVM = new VM();
-		std::thread newThread(forked, newVM, arg0);
+		std::thread newThread(forked, arg0);
 		newThread.detach();//分离新线程
 	}
 	else
@@ -136,10 +140,15 @@ void VM::_NativeCall(u64 NativeIndex)
 
 			ffi_cif cif;
 			//根据参数和返回值类型，设置cif模板
-			ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen, &retType, argTyeps);
-
-			//使用cif函数签名信息，调用函数
-			ffi_call(&cif, (void (*)(void)) nativeTable->items[NativeIndex].realAddress, resultBuffer, (void**)args);
+			//if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen, &retType, argTyeps) == FFI_OK)
+			//{
+			//	//使用cif函数签名信息，调用函数
+			//	ffi_call(&cif, (void (*)(void)) nativeTable->items[NativeIndex].realAddress, resultBuffer, (void**)args);
+			//}
+			//else
+			//{
+			//	throw "FFI参数错误";
+			//}
 
 
 			//释放为ffi参数类型描述符申请的内存
@@ -1742,7 +1751,7 @@ void VM::run()
 			{
 				if (callStack.getBP() == 0 && callStack.getSP() == 0)
 				{
-					gc(true);
+					setSafePoint();
 					goto __exit;
 				}
 				else
@@ -1754,7 +1763,11 @@ void VM::run()
 			case OPCODE::__exit:
 			{
 				program = 0x00;
-				gc(true);
+				setSafePoint();
+				if (!heap.empty())
+				{
+					throw "GC没有回收全部对象";
+				}
 				goto __exit;
 			}
 			break;
@@ -1767,7 +1780,7 @@ void VM::run()
 			}
 			if (calculateStack.getSP() == 0)//如果一行语句结束(计算栈没有内容)，则尝试进行GC
 			{
-				gc();
+				setSafePoint();
 			}
 		}
 	}
@@ -1802,10 +1815,6 @@ __exit:
 	{
 		throw "栈不平衡";
 	}
-	//if (!heap.empty())
-	//{
-	//	throw "GC没有回收全部对象";
-	//}
 }
 
 void VM::sweep()
@@ -1824,6 +1833,7 @@ void VM::sweep()
 			it++;
 		}
 	}
+	//std::cout << "gc数量:" << garbageCounter << std::endl;
 }
 
 
@@ -1981,7 +1991,10 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 void VM::GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots)
 {
 	u64 bp = vm.varStack.getBP();
-	for (auto it = vm.frameStack.rbegin(); it != vm.frameStack.rend(); it++)//逆序遍历
+	for (
+		auto it = vm.frameStack.rbegin();
+		it != vm.frameStack.rend();
+		it++)//逆序遍历
 	{
 		//把变量栈中所有指针放入GCRoot
 		FrameItem frameItem = *it;
@@ -2072,29 +2085,73 @@ bool VM::mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 		return false;
 	}
 }
-void VM::gc(bool force)
+
+void VM::setSafePoint()
 {
-	std::cout << "同一时刻只允许一个线程GC，而且要求所有线程都进入安全区" << std::endl;
-	//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
-	if (heap.size() < GCcondition && !force)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
+	isSafePoint = true;
+	if (!waitGC.try_lock())//如果GC线程已经在等待GC了，则等待GC完毕再返回
 	{
-		return;
+		waitGC.lock();//等待
 	}
-	std::list<HeapItem*> GCRoots;
-	/*下面的代码先标记program，然后对当前VM的变量栈进行分析*/
-	gcCounter++;
-	if (program != 0)
-	{
-		if (mark(GCRoots, (HeapItem*)(program - sizeof(HeapItem))))
+	waitGC.unlock();
+	isSafePoint = false;
+}
+
+void VM::gc()
+{
+	int i = 0;
+	for (;;) {
+		std::cout << i++ << std::endl;
+		waitGC.lock();
+		//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
+		if (heap.size() >= GCcondition)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 		{
-			auto realType = ((HeapItem*)(program - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
-			GCClassFieldAnalyze(GCRoots, program, realType);
+			for (auto it = VMs.begin(); it != VMs.end(); it++)//等待所有的线程都进入safePoint
+			{
+				for (; !(*it)->isSafePoint;)
+				{
+					std::this_thread::yield();
+				}
+			}
+
+
+			for (auto it1 = VMs.begin(); it1 != VMs.end(); it1++) {
+				VM& vm = *(*it1);
+				for (
+					auto it = vm.frameStack.rbegin();
+					it != vm.frameStack.rend();
+					it++)//逆序遍历
+				{
+					//把变量栈中所有指针放入GCRoot
+					FrameItem frameItem = *it;
+				}
+			}
+
+
+
+
+
+
+
+			std::list<HeapItem*> GCRoots;
+			/*下面的代码先标记program，然后对当前VM的变量栈进行分析*/
+			gcCounter++;
+			if (program != 0)
+			{
+				if (mark(GCRoots, (HeapItem*)(program - sizeof(HeapItem))))
+				{
+					auto realType = ((HeapItem*)(program - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
+					GCClassFieldAnalyze(GCRoots, program, realType);
+				}
+			}
+			for (auto it = VMs.begin(); it != VMs.end(); it++) {
+				GCRootsSearch(**it, GCRoots);
+			}
+			sweep();
 		}
+		waitGC.unlock();
+		//std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
-	for (auto it = VMs.begin(); it != VMs.end(); it++) {
-		GCRootsSearch(**it, GCRoots);
-	}
-	sweep();
 }
 VM::~VM()
 {

@@ -14,6 +14,8 @@
 #include <stack>
 #include <list>
 #include <set>
+#include <atomic>
+#include <mutex>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 struct Catch_item
@@ -45,6 +47,7 @@ public:
 	static u64 program;
 	static int GCcondition;//触发GC的对象数量
 	static std::set<VM*> VMs;
+	static std::mutex waitGC;//用于保证同一时刻只有一个线程在GC
 
 	static StringPool* stringPool;
 	static ClassTable* classTable;
@@ -54,21 +57,23 @@ public:
 	static IRs* irs;
 	static NativeTable* nativeTable;
 
-	void gc(bool force = false);
+	static void gc();
 
 	void run();
 
 	VM();
 	~VM();
 
-	friend void forked(VM* vm, HeapItem* funObj);
+	friend void forked(HeapItem* funObj);
 
 private:
+	std::atomic_bool isSafePoint = false;
 
 	Stack varStack;
 	Stack calculateStack;
 	Stack callStack;
-	std::list<FrameItem> frameStack;//因为需要遍历，所以用list完成stack的功能
+	//后面改为list，先把问题定位
+	std::vector<FrameItem> frameStack;//因为需要遍历，所以用list完成stack的功能
 	Stack unwindHandler;//函数
 	Stack unwindNumStack;//当前需要回退的数量
 
@@ -84,6 +89,7 @@ private:
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);
 	void _new(u64 type);
+	void setSafePoint();//设置安全点
 	void _NativeCall(u64 index);
 
 	static void GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,会标记所有能访问到的对象

@@ -44,23 +44,10 @@ int main(int argc, char** argv)
 	VM::nativeTable = &nativeTable;
 
 	VM vm;
-	try
-	{
-		std::thread gcThread(VM::gc);//启动GC线程
-		vm.run();
-		return 0;
-	}
-	catch (const char* err)
-	{
-		if (strcmp(err, "栈不平衡") == 0)
-		{
-			return 1;//栈不平衡抛出的异常，当有异常抛出且未被捕获时触发
-		}
-		else
-		{
-			//GC错误
-			std::cerr << "其他异常" << std::endl;
-			return 1;
-		}
-	}
+
+	std::thread gcThread(VM::gc);//启动GC线程
+	gcThread.detach();
+	vm.run();
+
+	return 0;
 }

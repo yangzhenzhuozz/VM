@@ -20,7 +20,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\VM\hpp\bridge.hpp">
+    <ClInclude Include="..\VM\bridge\bridge.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

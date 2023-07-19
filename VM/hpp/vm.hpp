@@ -58,16 +58,18 @@ public:
 	static NativeTable* nativeTable;
 
 	static void gc();
+	static volatile bool gcExit;//用于通知GC线程结束运行
+
+	void stackBalancingCheck();
+	void gcCheck();
 
 	void run();
 
 	VM();
 	~VM();
 
-	friend void forked(HeapItem* funObj);
-
 private:
-	std::atomic_bool isSafePoint = false;
+	volatile bool isSafePoint = false;
 
 	Stack varStack;
 	Stack calculateStack;
@@ -89,8 +91,9 @@ private:
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);
 	void _new(u64 type);
-	void setSafePoint();//设置安全点
+	void setSafePoint(bool isExit=false);//设置安全点
 	void _NativeCall(u64 index);
+	void fork(HeapItem* funObj);
 
 	static void GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,会标记所有能访问到的对象
 	static void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots

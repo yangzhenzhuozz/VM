@@ -20,15 +20,19 @@ TypeTable* VM::typeTable;
 IRs* VM::irs;
 NativeTable* VM::nativeTable;
 
-void forked(HeapItem* funObj)
+volatile bool VM::gcExit = false;
+
+void VM::fork(HeapItem* funObj)
 {
-	/*
-	* fork的参数会被GC回收掉
-	*/
-	VM vm;
-	vm.pc = funObj->text;
-	vm.calculateStack.push((u64)((u64*)funObj->data));
-	vm.run();
+	VM* vm = new VM();
+	vm->pc = funObj->text;
+	vm->calculateStack.push((u64)((u64*)funObj->data));
+	std::thread newThread(
+		[vm]() {
+			vm->run();
+			delete vm;
+		});
+	newThread.detach();//分离新线程
 }
 
 VM::VM() :
@@ -99,8 +103,7 @@ void VM::_NativeCall(u64 NativeIndex)
 	{
 		auto it = argumentsBuffer.begin();
 		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
-		std::thread newThread(forked, arg0);
-		newThread.detach();//分离新线程
+		fork(arg0);
 	}
 	else
 	{
@@ -114,15 +117,29 @@ void VM::_NativeCall(u64 NativeIndex)
 			char** args = new char* [argLen];//准备参数
 			ffi_type** argTyeps = new ffi_type * [argLen];//准备参数类型
 			auto it = argumentsBuffer.begin();
-			for (int argInex = 0; argInex < argLen; it++)
+			for (int argInex = 0; argInex < argLen; argInex++, it++)
 			{
+				u64 thisArgSize = nativeTable->items[NativeIndex].argList[argInex].size;
 				args[argInex] = (*it);//放置参数地址
 				argTyeps[argInex] = new ffi_type;
-				(*(argTyeps[argInex])).size = nativeTable->items[NativeIndex].argList[argInex].size;//参数大小
+				(*(argTyeps[argInex])).size = thisArgSize;//参数大小
 				(*(argTyeps[argInex])).alignment = 1;//对齐
 				(*(argTyeps[argInex])).type = FFI_TYPE_STRUCT;//按结构体传参
-				(*(argTyeps[argInex])).elements = nullptr;//没有元素
-				argInex++;
+
+				ffi_type* p = new ffi_type[10];
+
+				ffi_type** elements = new ffi_type * [thisArgSize + 1];//创建element
+				for (int i = 0; i < thisArgSize; ++i)
+				{
+					elements[i] = new ffi_type;
+					elements[i]->alignment = 1;
+					elements[i]->size = 1;
+					elements[i]->type = ffi_type_sint8.type;
+					elements[i]->elements = nullptr;
+				}
+				elements[thisArgSize] = nullptr;
+
+				(*(argTyeps[argInex])).elements = elements;
 			}
 
 			ffi_type retType;//返回值类型声明
@@ -135,26 +152,42 @@ void VM::_NativeCall(u64 NativeIndex)
 				retType.alignment = 1;
 				retType.size = resultSize;
 				retType.type = FFI_TYPE_STRUCT;
-				retType.elements = nullptr;
+				ffi_type** elements = new ffi_type * [resultSize + 1];//创建element
+				for (int i = 0; i < resultSize; ++i)
+				{
+					elements[i] = new ffi_type;
+					elements[i]->alignment = 1;
+					elements[i]->size = 1;
+					elements[i]->type = ffi_type_sint8.type;
+					elements[i]->elements = nullptr;
+				}
+				elements[resultSize] = nullptr;
+				retType.elements = elements;
 			}
 
 			ffi_cif cif;
 			//根据参数和返回值类型，设置cif模板
-			//if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen, &retType, argTyeps) == FFI_OK)
-			//{
-			//	//使用cif函数签名信息，调用函数
-			//	ffi_call(&cif, (void (*)(void)) nativeTable->items[NativeIndex].realAddress, resultBuffer, (void**)args);
-			//}
-			//else
-			//{
-			//	throw "FFI参数错误";
-			//}
+			if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen, &retType, argTyeps) == FFI_OK)
+			{
+				//使用cif函数签名信息，调用函数
+				ffi_call(&cif, (void (*)(void)) nativeTable->items[NativeIndex].realAddress, resultBuffer, (void**)args);
+			}
+			else
+			{
+				throw "FFI参数错误";
+			}
 
 
 			//释放为ffi参数类型描述符申请的内存
-			for (auto i = 0; i < argLen; i++)
+			for (int argInex = 0; argInex < argLen; argInex++)
 			{
-				delete argTyeps[i];
+				u64 thisArgSize = nativeTable->items[NativeIndex].argList[argInex].size;
+				for (int i = 0; i < thisArgSize; ++i)
+				{
+					delete argTyeps[argInex]->elements[i];
+				}
+				delete[] argTyeps[argInex]->elements;
+				delete argTyeps[argInex];
 			}
 			delete[] argTyeps;
 			delete[] args;
@@ -372,1425 +405,1415 @@ void VM::run()
 	* 比如系统触发了一个NullPointException，然后在构造NullPointException的时候又触发异常，直接GG，根本无法抢救
 	* 这里指的都是VM自身产生的异常，用户代码产生的异常不在此列
 	*/
-	try {
-		for (; pc < irs->length; pc++)
+	for (; pc < irs->length; pc++)
+	{
+		auto& ir = irs->items[pc];
+		switch (ir.opcode)
 		{
-			auto& ir = irs->items[pc];
-			switch (ir.opcode)
+		case OPCODE::_new:
+		{
+			_new(ir.operand1);
+		}
+		break;
+		case OPCODE::newFunc:
+		{
+			auto wrapIndex = ir.operand3;
+			auto& typeDesc = typeTable->items[wrapIndex];
+			auto name = typeDesc.name;
+			auto dataSize = classTable->items[typeDesc.innerType]->size;
+			HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
+			memset(heapitem->data, 0, dataSize);
+			heapitem->typeDesc = typeDesc;
+			heapitem->sol.size = dataSize;
+			heapitem->realTypeName = ir.operand2;
+			heapitem->wrapType = wrapIndex;
+			heapitem->text = ir.operand1;
+			calculateStack.push((u64)heapitem->data);
+			heapitem->gcMark = gcCounter - 1;
+			heap.push_back(heapitem);
+			if (heapitem->text == 0)
 			{
-			case OPCODE::_new:
-			{
-				_new(ir.operand1);
+				throw "error";
 			}
-			break;
-			case OPCODE::newFunc:
+		}
+		break;
+		case OPCODE::newArray:
+		{
+			auto arrayType = ir.operand1;
+			auto paramLen = ir.operand2;
+			u32* param = (u32*)calculateStack.pop(sizeof(i32) * paramLen);
+			u64 arrayAddress = newArray(arrayType, param, paramLen, 0);
+			calculateStack.push(arrayAddress);
+		}
+		break;
+		case OPCODE::program_load:
+		{
+			calculateStack.push(program);
+		}
+		break;
+		case OPCODE::program_store:
+		{
+			program = calculateStack.pop64();
+		}
+		break;
+		case OPCODE::p_getfield:
+		{
+			u64 baseObj = calculateStack.pop64();
+			if (baseObj == 0)
 			{
-				auto wrapIndex = ir.operand3;
-				auto& typeDesc = typeTable->items[wrapIndex];
-				auto name = typeDesc.name;
-				auto dataSize = classTable->items[typeDesc.innerType]->size;
-				HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
-				memset(heapitem->data, 0, dataSize);
-				heapitem->typeDesc = typeDesc;
-				heapitem->sol.size = dataSize;
-				heapitem->realTypeName = ir.operand2;
-				heapitem->wrapType = wrapIndex;
-				heapitem->text = ir.operand1;
-				calculateStack.push((u64)heapitem->data);
-				heapitem->gcMark = gcCounter - 1;
-				heap.push_back(heapitem);
-				if (heapitem->text == 0)
-				{
-					throw "error";
-				}
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 			}
-			break;
-			case OPCODE::newArray:
+			else
 			{
-				auto arrayType = ir.operand1;
-				auto paramLen = ir.operand2;
-				u32* param = (u32*)calculateStack.pop(sizeof(i32) * paramLen);
-				u64 arrayAddress = newArray(arrayType, param, paramLen, 0);
-				calculateStack.push(arrayAddress);
+				calculateStack.push(*(u64*)(baseObj + ir.operand1));
 			}
-			break;
-			case OPCODE::program_load:
+		}
+		break;
+		case OPCODE::p_putfield:
+		{
+			u64 value = calculateStack.pop64();
+			u64 targetObj = calculateStack.pop64();
+			if (targetObj == 0)
 			{
-				calculateStack.push(program);
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 			}
-			break;
-			case OPCODE::program_store:
+			else
 			{
-				program = calculateStack.pop64();
+				*(u64*)(targetObj + ir.operand1) = value;
 			}
-			break;
-			case OPCODE::p_getfield:
-			{
-				u64 baseObj = calculateStack.pop64();
-				if (baseObj == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					calculateStack.push(*(u64*)(baseObj + ir.operand1));
-				}
-			}
-			break;
-			case OPCODE::p_putfield:
-			{
-				u64 value = calculateStack.pop64();
-				u64 targetObj = calculateStack.pop64();
-				if (targetObj == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					*(u64*)(targetObj + ir.operand1) = value;
-				}
-			}
-			break;
-			case OPCODE::valueType_load:
-			{
-				calculateStack.push((char*)varStack.getDataAdder(ir.operand1), ir.operand2);
-			}
-			break;
-			case OPCODE::valueType_store:
-			{
-				char* data = (char*)calculateStack.pop(ir.operand2);
-				varStack.setData(data, ir.operand1, ir.operand2);
-			}
-			break;
-			case OPCODE::init_valueType_store:
-			{
-				char* data = (char*)calculateStack.pop(ir.operand2);
-				varStack.setData(data, ir.operand1, ir.operand2);
-				frameStack.back().frameSP = frameStack.back().frameSP + ir.operand2;
-			}
-			break;
-			case OPCODE::p_load:
-			{
-				auto val = *((u64*)varStack.getDataAdder(ir.operand1));
-				calculateStack.push(val);
-			}
-			break;
-			case OPCODE::p_store:
-			{
-				auto val = calculateStack.pop64();
-				varStack.setData((char*)&val, ir.operand1, sizeof(u64));
-			}
-			break;
-			case OPCODE::init_p_store:
-			{
-				auto val = calculateStack.pop64();
-				varStack.setData((char*)&val, ir.operand1, sizeof(u64));
-				frameStack.back().frameSP = frameStack.back().frameSP + sizeof(u64);
-			}
-			break;
+		}
+		break;
+		case OPCODE::valueType_load:
+		{
+			calculateStack.push((char*)varStack.getDataAdder(ir.operand1), ir.operand2);
+		}
+		break;
+		case OPCODE::valueType_store:
+		{
+			char* data = (char*)calculateStack.pop(ir.operand2);
+			varStack.setData(data, ir.operand1, ir.operand2);
+		}
+		break;
+		case OPCODE::init_valueType_store:
+		{
+			char* data = (char*)calculateStack.pop(ir.operand2);
+			varStack.setData(data, ir.operand1, ir.operand2);
+			frameStack.back().frameSP = frameStack.back().frameSP + ir.operand2;
+		}
+		break;
+		case OPCODE::p_load:
+		{
+			auto val = *((u64*)varStack.getDataAdder(ir.operand1));
+			calculateStack.push(val);
+		}
+		break;
+		case OPCODE::p_store:
+		{
+			auto val = calculateStack.pop64();
+			varStack.setData((char*)&val, ir.operand1, sizeof(u64));
+		}
+		break;
+		case OPCODE::init_p_store:
+		{
+			auto val = calculateStack.pop64();
+			varStack.setData((char*)&val, ir.operand1, sizeof(u64));
+			frameStack.back().frameSP = frameStack.back().frameSP + sizeof(u64);
+		}
+		break;
 
 
-			case OPCODE::i8_shl:
+		case OPCODE::i8_shl:
+		{
+			i32 v2 = calculateStack.pop32();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 << v2));
+		}
+		break;
+		case OPCODE::i8_shr:
+		{
+			i32 v2 = calculateStack.pop32();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 >> v2));
+		}
+		break;
+		case OPCODE::i8_or:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 | v2));
+		}
+		break;
+		case OPCODE::i8_and:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 & v2));
+		}
+		break;
+		case OPCODE::i8_xor:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 ^ v2));
+		}
+		break;
+		case OPCODE::i8_mod:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 % v2));
+		}
+		break;
+		case OPCODE::i8_add:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 + v2));
+		}
+		break;
+		case OPCODE::i8_sub:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 - v2));
+		}
+		break;
+		case OPCODE::i8_mul:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			calculateStack.push((i8)(v1 * v2));
+		}
+		break;
+		case OPCODE::i8_div:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v2 == 0)
 			{
-				i32 v2 = calculateStack.pop32();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 << v2));
+				_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 			}
-			break;
-			case OPCODE::i8_shr:
+			else
 			{
-				i32 v2 = calculateStack.pop32();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 >> v2));
+				calculateStack.push((i8)(v1 / v2));
 			}
-			break;
-			case OPCODE::i8_or:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 | v2));
-			}
-			break;
-			case OPCODE::i8_and:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 & v2));
-			}
-			break;
-			case OPCODE::i8_xor:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 ^ v2));
-			}
-			break;
-			case OPCODE::i8_mod:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 % v2));
-			}
-			break;
-			case OPCODE::i8_add:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 + v2));
-			}
-			break;
-			case OPCODE::i8_sub:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 - v2));
-			}
-			break;
-			case OPCODE::i8_mul:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				calculateStack.push((i8)(v1 * v2));
-			}
-			break;
-			case OPCODE::i8_div:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v2 == 0)
-				{
-					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
-				}
-				else
-				{
-					calculateStack.push((i8)(v1 / v2));
-				}
-			}
-			break;
-			case OPCODE::i8_inc:
-			{
-				i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
-				(*address)++;
-			}
-			break;
-			case OPCODE::i8_dec:
-			{
-				i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
-				(*address)--;
-			}
-			break;
-			case OPCODE::i8_not:
-			{
-				i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
-				(*address) = ~(*address);
-			}
-			break;
-			case OPCODE::i8_negative:
-			{
-				i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
-				(*address) = -(*address);
-			}
-			break;
+		}
+		break;
+		case OPCODE::i8_inc:
+		{
+			i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
+			(*address)++;
+		}
+		break;
+		case OPCODE::i8_dec:
+		{
+			i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
+			(*address)--;
+		}
+		break;
+		case OPCODE::i8_not:
+		{
+			i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
+			(*address) = ~(*address);
+		}
+		break;
+		case OPCODE::i8_negative:
+		{
+			i8* address = (i8*)calculateStack.getDataAdderTop(sizeof(i8));
+			(*address) = -(*address);
+		}
+		break;
 
 
 
-			case OPCODE::i16_shl:
+		case OPCODE::i16_shl:
+		{
+			i32 v2 = calculateStack.pop32();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 << v2));
+		}
+		break;
+		case OPCODE::i16_shr:
+		{
+			i32 v2 = calculateStack.pop32();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 >> v2));
+		}
+		break;
+		case OPCODE::i16_or:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 | v2));
+		}
+		break;
+		case OPCODE::i16_and:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 & v2));
+		}
+		break;
+		case OPCODE::i16_xor:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 ^ v2));
+		}
+		break;
+		case OPCODE::i16_mod:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 % v2));
+		}
+		break;
+		case OPCODE::i16_add:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 + v2));
+		}
+		break;
+		case OPCODE::i16_sub:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 - v2));
+		}
+		break;
+		case OPCODE::i16_mul:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			calculateStack.push((i16)(v1 * v2));
+		}
+		break;
+		case OPCODE::i16_div:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v2 == 0)
 			{
-				i32 v2 = calculateStack.pop32();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 << v2));
+				_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 			}
-			break;
-			case OPCODE::i16_shr:
+			else
 			{
-				i32 v2 = calculateStack.pop32();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 >> v2));
+				calculateStack.push((i16)(v1 / v2));
 			}
-			break;
-			case OPCODE::i16_or:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 | v2));
-			}
-			break;
-			case OPCODE::i16_and:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 & v2));
-			}
-			break;
-			case OPCODE::i16_xor:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 ^ v2));
-			}
-			break;
-			case OPCODE::i16_mod:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 % v2));
-			}
-			break;
-			case OPCODE::i16_add:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 + v2));
-			}
-			break;
-			case OPCODE::i16_sub:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 - v2));
-			}
-			break;
-			case OPCODE::i16_mul:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				calculateStack.push((i16)(v1 * v2));
-			}
-			break;
-			case OPCODE::i16_div:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v2 == 0)
-				{
-					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
-				}
-				else
-				{
-					calculateStack.push((i16)(v1 / v2));
-				}
-			}
-			break;
-			case OPCODE::i16_inc:
-			{
-				i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
-				(*address)++;
-			}
-			break;
-			case OPCODE::i16_dec:
-			{
-				i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
-				(*address)--;
-			}
-			break;
-			case OPCODE::i16_not:
-			{
-				i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
-				(*address) = ~(*address);
-			}
-			break;
-			case OPCODE::i16_negative:
-			{
-				i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
-				(*address) = -(*address);
-			}
-			break;
+		}
+		break;
+		case OPCODE::i16_inc:
+		{
+			i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
+			(*address)++;
+		}
+		break;
+		case OPCODE::i16_dec:
+		{
+			i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
+			(*address)--;
+		}
+		break;
+		case OPCODE::i16_not:
+		{
+			i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
+			(*address) = ~(*address);
+		}
+		break;
+		case OPCODE::i16_negative:
+		{
+			i16* address = (i16*)calculateStack.getDataAdderTop(sizeof(i16));
+			(*address) = -(*address);
+		}
+		break;
 
 
 
-			case OPCODE::i32_shl:
+		case OPCODE::i32_shl:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 << v2));
+		}
+		break;
+		case OPCODE::i32_shr:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 >> v2));
+		}
+		break;
+		case OPCODE::i32_or:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 | v2));
+		}
+		break;
+		case OPCODE::i32_and:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 & v2));
+		}
+		break;
+		case OPCODE::i32_xor:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 ^ v2));
+		}
+		break;
+		case OPCODE::i32_mod:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 % v2));
+		}
+		break;
+		case OPCODE::i32_add:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 + v2));
+		}
+		break;
+		case OPCODE::i32_sub:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 - v2));
+		}
+		break;
+		case OPCODE::i32_mul:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			calculateStack.push((i32)(v1 * v2));
+		}
+		break;
+		case OPCODE::i32_div:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v2 == 0)
 			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 << v2));
+				_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 			}
-			break;
-			case OPCODE::i32_shr:
+			else
 			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 >> v2));
+				calculateStack.push((i32)(v1 / v2));
 			}
-			break;
-			case OPCODE::i32_or:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 | v2));
-			}
-			break;
-			case OPCODE::i32_and:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 & v2));
-			}
-			break;
-			case OPCODE::i32_xor:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 ^ v2));
-			}
-			break;
-			case OPCODE::i32_mod:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 % v2));
-			}
-			break;
-			case OPCODE::i32_add:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 + v2));
-			}
-			break;
-			case OPCODE::i32_sub:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 - v2));
-			}
-			break;
-			case OPCODE::i32_mul:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				calculateStack.push((i32)(v1 * v2));
-			}
-			break;
-			case OPCODE::i32_div:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v2 == 0)
-				{
-					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
-				}
-				else
-				{
-					calculateStack.push((i32)(v1 / v2));
-				}
-			}
-			break;
-			case OPCODE::i32_inc:
-			{
-				i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
-				(*address)++;
-			}
-			break;
-			case OPCODE::i32_dec:
-			{
-				i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
-				(*address)--;
-			}
-			break;
-			case OPCODE::i32_not:
-			{
-				i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
-				(*address) = ~(*address);
-			}
-			break;
-			case OPCODE::i32_negative:
-			{
-				i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
-				(*address) = -(*address);
-			}
-			break;
+		}
+		break;
+		case OPCODE::i32_inc:
+		{
+			i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
+			(*address)++;
+		}
+		break;
+		case OPCODE::i32_dec:
+		{
+			i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
+			(*address)--;
+		}
+		break;
+		case OPCODE::i32_not:
+		{
+			i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
+			(*address) = ~(*address);
+		}
+		break;
+		case OPCODE::i32_negative:
+		{
+			i32* address = (i32*)calculateStack.getDataAdderTop(sizeof(i32));
+			(*address) = -(*address);
+		}
+		break;
 
 
 
-			case OPCODE::i64_shl:
+		case OPCODE::i64_shl:
+		{
+			i32 v2 = calculateStack.pop32();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 << v2));
+		}
+		break;
+		case OPCODE::i64_shr:
+		{
+			i32 v2 = calculateStack.pop32();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 >> v2));
+		}
+		break;
+		case OPCODE::i64_or:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 | v2));
+		}
+		break;
+		case OPCODE::i64_and:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 & v2));
+		}
+		break;
+		case OPCODE::i64_xor:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 ^ v2));
+		}
+		break;
+		case OPCODE::i64_mod:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 % v2));
+		}
+		break;
+		case OPCODE::i64_add:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 + v2));
+		}
+		break;
+		case OPCODE::i64_sub:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 - v2));
+		}
+		break;
+		case OPCODE::i64_mul:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			calculateStack.push((i64)(v1 * v2));
+		}
+		break;
+		case OPCODE::i64_div:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v2 == 0)
 			{
-				i32 v2 = calculateStack.pop32();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 << v2));
+				_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
 			}
-			break;
-			case OPCODE::i64_shr:
+			else
 			{
-				i32 v2 = calculateStack.pop32();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 >> v2));
+				calculateStack.push((i64)(v1 / v2));
 			}
-			break;
-			case OPCODE::i64_or:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 | v2));
-			}
-			break;
-			case OPCODE::i64_and:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 & v2));
-			}
-			break;
-			case OPCODE::i64_xor:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 ^ v2));
-			}
-			break;
-			case OPCODE::i64_mod:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 % v2));
-			}
-			break;
-			case OPCODE::i64_add:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 + v2));
-			}
-			break;
-			case OPCODE::i64_sub:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 - v2));
-			}
-			break;
-			case OPCODE::i64_mul:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				calculateStack.push((i64)(v1 * v2));
-			}
-			break;
-			case OPCODE::i64_div:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v2 == 0)
-				{
-					_VMThrowError(typeTable->system_exception_ArithmeticException, irs->ArithmeticException_init, irs->ArithmeticException_constructor);
-				}
-				else
-				{
-					calculateStack.push((i64)(v1 / v2));
-				}
-			}
-			break;
-			case OPCODE::i64_inc:
-			{
-				i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
-				(*address)++;
-			}
-			break;
-			case OPCODE::i64_dec:
-			{
-				i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
-				(*address)--;
-			}
-			break;
-			case OPCODE::i64_not:
-			{
-				i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
-				(*address) = ~(*address);
-			}
-			break;
-			case OPCODE::i64_negative:
-			{
-				i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
-				(*address) = -(*address);
-			}
-			break;
+		}
+		break;
+		case OPCODE::i64_inc:
+		{
+			i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
+			(*address)++;
+		}
+		break;
+		case OPCODE::i64_dec:
+		{
+			i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
+			(*address)--;
+		}
+		break;
+		case OPCODE::i64_not:
+		{
+			i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
+			(*address) = ~(*address);
+		}
+		break;
+		case OPCODE::i64_negative:
+		{
+			i64* address = (i64*)calculateStack.getDataAdderTop(sizeof(i64));
+			(*address) = -(*address);
+		}
+		break;
 
 
-			case OPCODE::double_add:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				calculateStack.push((double)(v1 + v2));
-			}
-			break;
-			case OPCODE::double_sub:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				calculateStack.push((double)(v1 - v2));
-			}
-			break;
-			case OPCODE::double_mul:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				calculateStack.push((double)(v1 * v2));
-			}
-			break;
-			case OPCODE::double_div:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				calculateStack.push((double)(v1 / v2));
-			}
-			break;
-			case OPCODE::double_inc:
-			{
-				double* address = (double*)calculateStack.getDataAdderTop(sizeof(double));
-				(*address)++;
-			}
-			break;
-			case OPCODE::double_dec:
-			{
-				double* address = (double*)calculateStack.getDataAdderTop(sizeof(double));
-				(*address)--;
-			}
-			break;
-			case OPCODE::double_negative:
-			{
-				double* address = (double*)calculateStack.getDataAdderTop(sizeof(double));
-				(*address) = -(*address);
-			}
-			break;
-
-
-
-			case OPCODE::i8_if_gt:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v1 > v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i8_if_ge:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v1 >= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i8_if_lt:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v1 < v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i8_if_le:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v1 <= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i8_if_cmp_eq:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v1 == v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i8_if_cmp_ne:
-			{
-				i8 v2 = calculateStack.pop8();
-				i8 v1 = calculateStack.pop8();
-				if (v1 != v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
+		case OPCODE::double_add:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			calculateStack.push((double)(v1 + v2));
+		}
+		break;
+		case OPCODE::double_sub:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			calculateStack.push((double)(v1 - v2));
+		}
+		break;
+		case OPCODE::double_mul:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			calculateStack.push((double)(v1 * v2));
+		}
+		break;
+		case OPCODE::double_div:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			calculateStack.push((double)(v1 / v2));
+		}
+		break;
+		case OPCODE::double_inc:
+		{
+			double* address = (double*)calculateStack.getDataAdderTop(sizeof(double));
+			(*address)++;
+		}
+		break;
+		case OPCODE::double_dec:
+		{
+			double* address = (double*)calculateStack.getDataAdderTop(sizeof(double));
+			(*address)--;
+		}
+		break;
+		case OPCODE::double_negative:
+		{
+			double* address = (double*)calculateStack.getDataAdderTop(sizeof(double));
+			(*address) = -(*address);
+		}
+		break;
 
 
 
-
-
-			case OPCODE::i16_if_gt:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v1 > v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i16_if_ge:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v1 >= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i16_if_lt:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v1 < v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i16_if_le:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v1 <= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i16_if_cmp_eq:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v1 == v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i16_if_cmp_ne:
-			{
-				i16 v2 = calculateStack.pop16();
-				i16 v1 = calculateStack.pop16();
-				if (v1 != v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-
-			case OPCODE::i32_if_gt:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v1 > v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i32_if_ge:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v1 >= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i32_if_lt:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v1 < v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i32_if_le:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v1 <= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i32_if_cmp_eq:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v1 == v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i32_if_cmp_ne:
-			{
-				i32 v2 = calculateStack.pop32();
-				i32 v1 = calculateStack.pop32();
-				if (v1 != v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-
-
-			case OPCODE::i64_if_gt:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v1 > v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i64_if_ge:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v1 >= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i64_if_lt:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v1 < v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i64_if_le:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v1 <= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i64_if_cmp_eq:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v1 == v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i64_if_cmp_ne:
-			{
-				i64 v2 = calculateStack.pop64();
-				i64 v1 = calculateStack.pop64();
-				if (v1 != v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-
-
-			case OPCODE::double_if_gt:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				if (v1 > v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::double_if_ge:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				if (v1 >= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::double_if_lt:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				if (v1 < v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::double_if_le:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				if (v1 <= v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::double_if_cmp_eq:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				if (v1 == v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::double_if_cmp_ne:
-			{
-				double v2 = calculateStack.pop_double();
-				double v1 = calculateStack.pop_double();
-				if (v1 != v2)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-
-
-
-			case OPCODE::i8_if_false:
-			{
-				auto v = calculateStack.pop8();
-				if (v == 0)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-			case OPCODE::i8_if_true:
-			{
-				auto v = calculateStack.pop8();
-				if (v == 1)
-				{
-					pc += ir.operand1 - 1;
-				}
-			}
-			break;
-
-
-
-			case OPCODE::jmp:
+		case OPCODE::i8_if_gt:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v1 > v2)
 			{
 				pc += ir.operand1 - 1;
 			}
-			break;
-			case OPCODE::p_dup:
+		}
+		break;
+		case OPCODE::i8_if_ge:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v1 >= v2)
 			{
-				calculateStack.push(calculateStack.top64());
+				pc += ir.operand1 - 1;
 			}
-			break;
-			case OPCODE::valueType_pop:
+		}
+		break;
+		case OPCODE::i8_if_lt:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v1 < v2)
 			{
-				calculateStack.pop(ir.operand1);
+				pc += ir.operand1 - 1;
 			}
-			break;
-			case OPCODE::p_pop:
+		}
+		break;
+		case OPCODE::i8_if_le:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v1 <= v2)
 			{
-				calculateStack.pop64();
+				pc += ir.operand1 - 1;
 			}
-			break;
-			case OPCODE::abs_call:
+		}
+		break;
+		case OPCODE::i8_if_cmp_eq:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v1 == v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i8_if_cmp_ne:
+		{
+			i8 v2 = calculateStack.pop8();
+			i8 v1 = calculateStack.pop8();
+			if (v1 != v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+
+
+
+
+
+		case OPCODE::i16_if_gt:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v1 > v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i16_if_ge:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v1 >= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i16_if_lt:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v1 < v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i16_if_le:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v1 <= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i16_if_cmp_eq:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v1 == v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i16_if_cmp_ne:
+		{
+			i16 v2 = calculateStack.pop16();
+			i16 v1 = calculateStack.pop16();
+			if (v1 != v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+
+		case OPCODE::i32_if_gt:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v1 > v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i32_if_ge:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v1 >= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i32_if_lt:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v1 < v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i32_if_le:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v1 <= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i32_if_cmp_eq:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v1 == v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i32_if_cmp_ne:
+		{
+			i32 v2 = calculateStack.pop32();
+			i32 v1 = calculateStack.pop32();
+			if (v1 != v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+
+
+		case OPCODE::i64_if_gt:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v1 > v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i64_if_ge:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v1 >= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i64_if_lt:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v1 < v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i64_if_le:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v1 <= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i64_if_cmp_eq:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v1 == v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i64_if_cmp_ne:
+		{
+			i64 v2 = calculateStack.pop64();
+			i64 v1 = calculateStack.pop64();
+			if (v1 != v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+
+
+		case OPCODE::double_if_gt:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			if (v1 > v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::double_if_ge:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			if (v1 >= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::double_if_lt:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			if (v1 < v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::double_if_le:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			if (v1 <= v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::double_if_cmp_eq:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			if (v1 == v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::double_if_cmp_ne:
+		{
+			double v2 = calculateStack.pop_double();
+			double v1 = calculateStack.pop_double();
+			if (v1 != v2)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+
+
+
+		case OPCODE::i8_if_false:
+		{
+			auto v = calculateStack.pop8();
+			if (v == 0)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+		case OPCODE::i8_if_true:
+		{
+			auto v = calculateStack.pop8();
+			if (v == 1)
+			{
+				pc += ir.operand1 - 1;
+			}
+		}
+		break;
+
+
+
+		case OPCODE::jmp:
+		{
+			pc += ir.operand1 - 1;
+		}
+		break;
+		case OPCODE::p_dup:
+		{
+			calculateStack.push(calculateStack.top64());
+		}
+		break;
+		case OPCODE::valueType_pop:
+		{
+			calculateStack.pop(ir.operand1);
+		}
+		break;
+		case OPCODE::p_pop:
+		{
+			calculateStack.pop64();
+		}
+		break;
+		case OPCODE::abs_call:
+		{
+			callStack.push(pc);
+			pc = ir.operand1 - 1;//因为在for循环结束会自动加一
+		}
+		break;
+		case OPCODE::call:
+		{
+			auto functionObj = calculateStack.top64();
+			if (functionObj == 0)
+			{
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
 			{
 				callStack.push(pc);
-				pc = ir.operand1 - 1;//因为在for循环结束会自动加一
-			}
-			break;
-			case OPCODE::call:
-			{
-				auto functionObj = calculateStack.top64();
-				if (functionObj == 0)
+				HeapItem* heapItem = (HeapItem*)(functionObj - sizeof(HeapItem));
+				if (heapItem->text == 0)
 				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+					throw "error";
+				}
+				pc = heapItem->text - 1;
+			}
+		}
+		break;
+		case OPCODE::alloc:
+		{
+			frameStack.back().frameSP = frameStack.back().frameSP + ir.operand1;
+		}
+		break;
+		case OPCODE::alloc_null:
+		{
+			frameStack.back().frameSP = frameStack.back().frameSP + 8;
+			memset((char*)((u64)varStack.getBufferAddress() + varStack.getBP() + frameStack.back().frameSP - ir.operand1), 0x00, 8);
+		}
+		break;
+		case OPCODE::native_call:
+		{
+			calculateStack.pop64();//从计算栈中弹出函数对象
+			_NativeCall(ir.operand1);
+		}
+		break;
+		case OPCODE::const_i8_load:
+		{
+			calculateStack.push((u8)ir.operand1);
+		}
+		break;
+		case OPCODE::const_i16_load:
+		{
+			calculateStack.push((u16)ir.operand1);
+		}
+		break;
+		case OPCODE::const_i32_load:
+		{
+			calculateStack.push((u32)ir.operand1);
+		}
+		break;
+		case OPCODE::const_i64_load:
+		{
+			calculateStack.push((u64)ir.operand1);
+		}
+		break;
+		case OPCODE::const_double_load:
+		{
+			calculateStack.push((u64)ir.operand1);
+		}
+		break;
+		case OPCODE::valueType_getfield:
+		{
+			u64 baseObj = calculateStack.pop64();
+			if (baseObj == 0)
+			{
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				char* data = (char*)(baseObj + ir.operand1);
+				calculateStack.push(data, ir.operand2);
+			}
+		}
+		break;
+		case OPCODE::valueType_putfield:
+		{
+			char* data = (char*)calculateStack.pop(ir.operand2);
+			u64 targetObj = calculateStack.pop64();
+			if (targetObj == 0)
+			{
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				memcpy((char*)(targetObj + ir.operand1), data, ir.operand2);
+			}
+		}
+		break;
+		case OPCODE::getfield_address:
+		{
+			auto baseAdd = calculateStack.pop64();
+			if (baseAdd == 0)
+			{
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				auto add = baseAdd + ir.operand1;
+				calculateStack.push(add);
+			}
+		}
+		break;
+		case OPCODE::load_address:
+		{
+			calculateStack.push((u64)varStack.getDataAdder(ir.operand1));
+		}
+		break;
+		case OPCODE::array_get_element_address:
+		{
+			auto index = calculateStack.pop32();
+			auto arrayAddress = calculateStack.pop64();
+			if (arrayAddress == 0)
+			{
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
+				if (index >= heapitem->sol.length)
+				{
+					_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 				}
 				else
 				{
-					callStack.push(pc);
-					HeapItem* heapItem = (HeapItem*)(functionObj - sizeof(HeapItem));
-					if (heapItem->text == 0)
-					{
-						throw "error";
-					}
-					pc = heapItem->text - 1;
+					calculateStack.push((u64)(arrayAddress + ir.operand1 * index));
 				}
 			}
-			break;
-			case OPCODE::alloc:
+		}
+		break;
+		case OPCODE::array_get_point:
+		{
+			auto index = calculateStack.pop32();
+			auto arrayAddress = calculateStack.pop64();
+			if (arrayAddress == 0)
 			{
-				frameStack.back().frameSP = frameStack.back().frameSP + ir.operand1;
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 			}
-			break;
-			case OPCODE::alloc_null:
+			else
 			{
-				frameStack.back().frameSP = frameStack.back().frameSP + 8;
-				memset((char*)((u64)varStack.getBufferAddress() + varStack.getBP() + frameStack.back().frameSP - ir.operand1), 0x00, 8);
-			}
-			break;
-			case OPCODE::native_call:
-			{
-				calculateStack.pop64();//从计算栈中弹出函数对象
-				_NativeCall(ir.operand1);
-			}
-			break;
-			case OPCODE::const_i8_load:
-			{
-				calculateStack.push((u8)ir.operand1);
-			}
-			break;
-			case OPCODE::const_i16_load:
-			{
-				calculateStack.push((u16)ir.operand1);
-			}
-			break;
-			case OPCODE::const_i32_load:
-			{
-				calculateStack.push((u32)ir.operand1);
-			}
-			break;
-			case OPCODE::const_i64_load:
-			{
-				calculateStack.push((u64)ir.operand1);
-			}
-			break;
-			case OPCODE::const_double_load:
-			{
-				calculateStack.push((u64)ir.operand1);
-			}
-			break;
-			case OPCODE::valueType_getfield:
-			{
-				u64 baseObj = calculateStack.pop64();
-				if (baseObj == 0)
+				HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
+				if (index >= heapitem->sol.length)
 				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 				}
 				else
 				{
-					char* data = (char*)(baseObj + ir.operand1);
-					calculateStack.push(data, ir.operand2);
+					auto val = *(u64*)(arrayAddress + sizeof(u64) * index);
+					calculateStack.push(val);
 				}
 			}
-			break;
-			case OPCODE::valueType_putfield:
+		}
+		break;
+		case OPCODE::array_get_valueType:
+		{
+			auto index = calculateStack.pop32();
+			auto arrayAddress = calculateStack.pop64();
+			if (arrayAddress == 0)
 			{
-				char* data = (char*)calculateStack.pop(ir.operand2);
-				u64 targetObj = calculateStack.pop64();
-				if (targetObj == 0)
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
+				if (index >= heapitem->sol.length)
 				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 				}
 				else
 				{
-					memcpy((char*)(targetObj + ir.operand1), data, ir.operand2);
+					char* data = (char*)(arrayAddress + ir.operand1 * index);
+					calculateStack.push(data, ir.operand1);
 				}
 			}
-			break;
-			case OPCODE::getfield_address:
+		}
+		break;
+		case OPCODE::array_set_point:
+		{
+			auto val = calculateStack.pop64();
+			auto index = calculateStack.pop32();
+			auto arrayAddress = calculateStack.pop64();
+			if (arrayAddress == 0)
 			{
-				auto baseAdd = calculateStack.pop64();
-				if (baseAdd == 0)
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
+				if (index >= heapitem->sol.length)
 				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 				}
 				else
 				{
-					auto add = baseAdd + ir.operand1;
-					calculateStack.push(add);
+					u64* dest = (u64*)(arrayAddress + sizeof(u64) * index);
+					*dest = val;
 				}
 			}
-			break;
-			case OPCODE::load_address:
+		}
+		break;
+		case OPCODE::array_set_valueType:
+		{
+			char* valpoint = (char*)calculateStack.pop(ir.operand1);
+			auto index = calculateStack.pop32();
+			auto arrayAddress = calculateStack.pop64();
+			if (arrayAddress == 0)
 			{
-				calculateStack.push((u64)varStack.getDataAdder(ir.operand1));
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 			}
-			break;
-			case OPCODE::array_get_element_address:
+			else
 			{
-				auto index = calculateStack.pop32();
-				auto arrayAddress = calculateStack.pop64();
-				if (arrayAddress == 0)
+				HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
+				if (index >= heapitem->sol.length)
 				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+					_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
 				}
 				else
 				{
-					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
-					if (index >= heapitem->sol.length)
-					{
-						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
-					}
-					else
-					{
-						calculateStack.push((u64)(arrayAddress + ir.operand1 * index));
-					}
+					memcpy((char*)(arrayAddress + ir.operand1 * index), valpoint, ir.operand1);
 				}
 			}
-			break;
-			case OPCODE::array_get_point:
+		}
+		break;
+		case OPCODE::access_array_length:
+		{
+			auto arrayAddress = calculateStack.pop64();
+			if (arrayAddress == 0)
 			{
-				auto index = calculateStack.pop32();
-				auto arrayAddress = calculateStack.pop64();
-				if (arrayAddress == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
-					if (index >= heapitem->sol.length)
-					{
-						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
-					}
-					else
-					{
-						auto val = *(u64*)(arrayAddress + sizeof(u64) * index);
-						calculateStack.push(val);
-					}
-				}
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 			}
-			break;
-			case OPCODE::array_get_valueType:
+			else
 			{
-				auto index = calculateStack.pop32();
-				auto arrayAddress = calculateStack.pop64();
-				if (arrayAddress == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
-					if (index >= heapitem->sol.length)
-					{
-						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
-					}
-					else
-					{
-						char* data = (char*)(arrayAddress + ir.operand1 * index);
-						calculateStack.push(data, ir.operand1);
-					}
-				}
+				HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
+				calculateStack.push((u32)heapitem->sol.length);
 			}
-			break;
-			case OPCODE::array_set_point:
+		}
+		break;
+		case OPCODE::box:
+		{
+			auto typeIndex = ir.operand1;
+			auto& typeDesc = typeTable->items[typeIndex];
+			auto  name = typeDesc.name;
+			auto dataSize = classTable->items[typeDesc.innerType]->size;
+			if (classTable->items[typeDesc.innerType]->isVALUE != 0)
 			{
-				auto val = calculateStack.pop64();
-				auto index = calculateStack.pop32();
-				auto arrayAddress = calculateStack.pop64();
-				if (arrayAddress == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
-					if (index >= heapitem->sol.length)
-					{
-						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
-					}
-					else
-					{
-						u64* dest = (u64*)(arrayAddress + sizeof(u64) * index);
-						*dest = val;
-					}
-				}
-			}
-			break;
-			case OPCODE::array_set_valueType:
-			{
-				char* valpoint = (char*)calculateStack.pop(ir.operand1);
-				auto index = calculateStack.pop32();
-				auto arrayAddress = calculateStack.pop64();
-				if (arrayAddress == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
-					if (index >= heapitem->sol.length)
-					{
-						_VMThrowError(typeTable->system_exception_ArrayIndexOutOfBoundsException, irs->ArrayIndexOutOfBoundsException_init, irs->ArrayIndexOutOfBoundsException_constructor);
-					}
-					else
-					{
-						memcpy((char*)(arrayAddress + ir.operand1 * index), valpoint, ir.operand1);
-					}
-				}
-			}
-			break;
-			case OPCODE::access_array_length:
-			{
-				auto arrayAddress = calculateStack.pop64();
-				if (arrayAddress == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					HeapItem* heapitem = (HeapItem*)(arrayAddress - sizeof(HeapItem));
-					calculateStack.push((u32)heapitem->sol.length);
-				}
-			}
-			break;
-			case OPCODE::box:
-			{
-				auto typeIndex = ir.operand1;
-				auto& typeDesc = typeTable->items[typeIndex];
-				auto  name = typeDesc.name;
-				auto dataSize = classTable->items[typeDesc.innerType]->size;
-				if (classTable->items[typeDesc.innerType]->isVALUE != 0)
-				{
-					HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
-					auto src = (char*)(calculateStack.getBufferAddress() + calculateStack.getSP() - dataSize);
-					memcpy(heapitem->data, src, dataSize);
-					heapitem->typeDesc = typeDesc;
-					heapitem->sol.size = dataSize;
-					heapitem->realTypeName = typeIndex;
-					heapitem->gcMark = gcCounter - 1;
-					heap.push_back(heapitem);
+				HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
+				auto src = (char*)(calculateStack.getBufferAddress() + calculateStack.getSP() - dataSize);
+				memcpy(heapitem->data, src, dataSize);
+				heapitem->typeDesc = typeDesc;
+				heapitem->sol.size = dataSize;
+				heapitem->realTypeName = typeIndex;
+				heapitem->gcMark = gcCounter - 1;
+				heap.push_back(heapitem);
 
-					calculateStack.setSP(calculateStack.getSP() - dataSize);
-					calculateStack.push((u64)(heapitem->data));
-				}
-				else
-				{
-					throw "value type cann box only";
-				}
+				calculateStack.setSP(calculateStack.getSP() - dataSize);
+				calculateStack.push((u64)(heapitem->data));
 			}
-			break;
-			case OPCODE::unbox:
+			else
 			{
-				HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
-				TypeItem& srcTypeDesc = (*heapItem).typeDesc;
+				throw "value type cann box only";
+			}
+		}
+		break;
+		case OPCODE::unbox:
+		{
+			HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
+			TypeItem& srcTypeDesc = (*heapItem).typeDesc;
+			TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
+			if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
+			{
+				_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
+			}
+			else
+			{
+				calculateStack.push(heapItem->data, heapItem->sol.size);
+			}
+		}
+		break;
+		case OPCODE::instanceof:
+		{
+			HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
+			TypeItem& srcTypeDesc = (*heapItem).typeDesc;
+			TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
+			if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
+			{
+				calculateStack.push((i8)0);
+			}
+			else
+			{
+				calculateStack.push((i8)1);
+			}
+		}
+		break;
+		case OPCODE::castCheck:
+		{
+			auto objAddress = calculateStack.top64();
+			if (objAddress == 0)
+			{
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+			}
+			else
+			{
+				TypeItem& srcTypeDesc = (*(HeapItem*)(objAddress - sizeof(HeapItem))).typeDesc;
 				TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
 				if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
 				{
 					_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
 				}
-				else
-				{
-					calculateStack.push(heapItem->data, heapItem->sol.size);
-				}
-			}
-			break;
-			case OPCODE::instanceof:
-			{
-				HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
-				TypeItem& srcTypeDesc = (*heapItem).typeDesc;
-				TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
-				if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
-				{
-					calculateStack.push((i8)0);
-				}
-				else
-				{
-					calculateStack.push((i8)1);
-				}
-			}
-			break;
-			case OPCODE::castCheck:
-			{
-				auto objAddress = calculateStack.top64();
-				if (objAddress == 0)
-				{
-					_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-				}
-				else
-				{
-					TypeItem& srcTypeDesc = (*(HeapItem*)(objAddress - sizeof(HeapItem))).typeDesc;
-					TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
-					if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
-					{
-						_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
-					}
-				}
-			}
-			break;
-
-			case OPCODE::b2s: {i8 v = calculateStack.pop8(); calculateStack.push((i16)v); } break;
-			case OPCODE::b2i: {i8 v = calculateStack.pop8(); calculateStack.push((i32)v); } break;
-			case OPCODE::b2l: {i8 v = calculateStack.pop8(); calculateStack.push((i64)v); } break;
-			case OPCODE::b2d: {i8 v = calculateStack.pop8(); calculateStack.push((double)v); } break;
-
-			case OPCODE::s2b: {i16 v = calculateStack.pop16(); calculateStack.push((i8)v); } break;
-			case OPCODE::s2i: {i16 v = calculateStack.pop16(); calculateStack.push((i32)v); } break;
-			case OPCODE::s2l: {i16 v = calculateStack.pop16(); calculateStack.push((i64)v); } break;
-			case OPCODE::s2d: {i16 v = calculateStack.pop16(); calculateStack.push((double)v); } break;
-
-			case OPCODE::i2b: {i32 v = calculateStack.pop32(); calculateStack.push((i8)v); } break;
-			case OPCODE::i2s: {i32 v = calculateStack.pop32(); calculateStack.push((i16)v); } break;
-			case OPCODE::i2l: {i32 v = calculateStack.pop32(); calculateStack.push((i64)v); } break;
-			case OPCODE::i2d: {i32 v = calculateStack.pop32(); calculateStack.push((double)v); } break;
-
-			case OPCODE::l2b: {i64 v = calculateStack.pop64(); calculateStack.push((i8)v); } break;
-			case OPCODE::l2s: {i64 v = calculateStack.pop64(); calculateStack.push((i16)v); } break;
-			case OPCODE::l2i: {i64 v = calculateStack.pop64(); calculateStack.push((i32)v); } break;
-			case OPCODE::l2d: {i64 v = calculateStack.pop64(); calculateStack.push((double)v); } break;
-
-			case OPCODE::d2b: {double v = calculateStack.pop_double(); calculateStack.push((i8)v); } break;
-			case OPCODE::d2s: {double v = calculateStack.pop_double(); calculateStack.push((i16)v); } break;
-			case OPCODE::d2i: {double v = calculateStack.pop_double(); calculateStack.push((i32)v); } break;
-			case OPCODE::d2l: {double v = calculateStack.pop_double(); calculateStack.push((i64)v); } break;
-
-			case OPCODE::push_stack_map:
-			{
-				FrameItem item = { 0 };
-				item.frameSP = stackFrameTable->items[ir.operand1]->baseOffset;
-				item.lastBP = varStack.getBP();
-				item.frameIndex = ir.operand1;
-				item.isTryBlock = stackFrameTable->items[ir.operand1]->isTryBlock;
-				//如果是函数block，则更新bp
-				if (stackFrameTable->items[ir.operand1]->isFunctionBlock)
-				{
-					varStack.setBP(varStack.getSP());
-				}
-				//申请变量空间
-				varStack.setSP(varStack.getSP() + stackFrameTable->items[ir.operand1]->size);
-
-				frameStack.push_back(item);
-			}
-			break;
-			case OPCODE::pop_stack_map:
-			{
-				pop_stack_map(ir.operand1, false);
-			}
-			break;
-
-			case OPCODE::push_unwind:
-			{
-				auto point = calculateStack.pop64();
-				unwindHandler.push(point);
-			}
-			break;
-			case OPCODE::pop_unwind:
-			{
-				auto handler = unwindHandler.pop64();
-				calculateStack.push(handler);
-				unwindNumStack.push(unwindNumStack.pop64() - 1);
-			}
-			break;
-			case OPCODE::if_unneed_unwind:
-			{
-				if (unwindNumStack.top64() == 0)
-				{
-					pc = pc + ir.operand1 - 1;
-					unwindNumStack.pop64();
-				}
-			}
-			break;
-
-			case OPCODE::push_catch_block:
-			{
-				calculateStack.push(ir.operand1);
-				calculateStack.push(ir.operand2);
-			}
-			break;
-			case OPCODE::save_catch_point:
-			{
-				Catch_point point;
-				for (u64 i = 0; i < ir.operand1; i++)
-				{
-					auto type = calculateStack.pop64();
-					auto irAddress = calculateStack.pop64();//intermedial represent
-					Catch_item item;
-					item.type = type;
-					item.irAddress = irAddress;
-					point.type_list.push_back(item);
-				}
-				point.varBP = varStack.getBP();
-				point.varSP = varStack.getSP();
-				point.frameLevel = frameStack.size();
-				point.callStackSP = callStack.getSP();
-				catchStack.push(point);
-			}
-			break;
-			case OPCODE::clear_calculate_stack:
-			{
-				calculateStack.setSP(0);
-			}
-			break;
-			case OPCODE::_throw:
-			{
-				_throw(ir.operand1);
-			}
-			break;
-
-			case OPCODE::clear_VM_Error_flag:
-			{
-				VMError = false;
-			}
-			break;
-
-			case OPCODE::store_VM_Error:
-			{
-				auto error = calculateStack.pop64();
-				calculateStack.setSP(0);
-				calculateStack.push(error);
-			}
-			break;
-			case OPCODE::ret:
-			{
-				if (callStack.getBP() == 0 && callStack.getSP() == 0)
-				{
-					setSafePoint();
-					goto __exit;
-				}
-				else
-				{
-					pc = callStack.pop64();
-				}
-			}
-			break;
-			case OPCODE::__exit:
-			{
-				program = 0x00;
-				setSafePoint();
-				if (!heap.empty())
-				{
-					throw "GC没有回收全部对象";
-				}
-				goto __exit;
-			}
-			break;
-
-			default:
-			{
-				throw "unimplement";
-			}
-			break;
-			}
-			if (calculateStack.getSP() == 0)//如果一行语句结束(计算栈没有内容)，则尝试进行GC
-			{
-				setSafePoint();
 			}
 		}
-	}
-	catch (char* err) {
-		std::cerr << err << std::endl;
-	}
-	catch (const char* err) {
-		std::cerr << err << std::endl;
+		break;
+
+		case OPCODE::b2s: {i8 v = calculateStack.pop8(); calculateStack.push((i16)v); } break;
+		case OPCODE::b2i: {i8 v = calculateStack.pop8(); calculateStack.push((i32)v); } break;
+		case OPCODE::b2l: {i8 v = calculateStack.pop8(); calculateStack.push((i64)v); } break;
+		case OPCODE::b2d: {i8 v = calculateStack.pop8(); calculateStack.push((double)v); } break;
+
+		case OPCODE::s2b: {i16 v = calculateStack.pop16(); calculateStack.push((i8)v); } break;
+		case OPCODE::s2i: {i16 v = calculateStack.pop16(); calculateStack.push((i32)v); } break;
+		case OPCODE::s2l: {i16 v = calculateStack.pop16(); calculateStack.push((i64)v); } break;
+		case OPCODE::s2d: {i16 v = calculateStack.pop16(); calculateStack.push((double)v); } break;
+
+		case OPCODE::i2b: {i32 v = calculateStack.pop32(); calculateStack.push((i8)v); } break;
+		case OPCODE::i2s: {i32 v = calculateStack.pop32(); calculateStack.push((i16)v); } break;
+		case OPCODE::i2l: {i32 v = calculateStack.pop32(); calculateStack.push((i64)v); } break;
+		case OPCODE::i2d: {i32 v = calculateStack.pop32(); calculateStack.push((double)v); } break;
+
+		case OPCODE::l2b: {i64 v = calculateStack.pop64(); calculateStack.push((i8)v); } break;
+		case OPCODE::l2s: {i64 v = calculateStack.pop64(); calculateStack.push((i16)v); } break;
+		case OPCODE::l2i: {i64 v = calculateStack.pop64(); calculateStack.push((i32)v); } break;
+		case OPCODE::l2d: {i64 v = calculateStack.pop64(); calculateStack.push((double)v); } break;
+
+		case OPCODE::d2b: {double v = calculateStack.pop_double(); calculateStack.push((i8)v); } break;
+		case OPCODE::d2s: {double v = calculateStack.pop_double(); calculateStack.push((i16)v); } break;
+		case OPCODE::d2i: {double v = calculateStack.pop_double(); calculateStack.push((i32)v); } break;
+		case OPCODE::d2l: {double v = calculateStack.pop_double(); calculateStack.push((i64)v); } break;
+
+		case OPCODE::push_stack_map:
+		{
+			FrameItem item = { 0 };
+			item.frameSP = stackFrameTable->items[ir.operand1]->baseOffset;
+			item.lastBP = varStack.getBP();
+			item.frameIndex = ir.operand1;
+			item.isTryBlock = stackFrameTable->items[ir.operand1]->isTryBlock;
+			//如果是函数block，则更新bp
+			if (stackFrameTable->items[ir.operand1]->isFunctionBlock)
+			{
+				varStack.setBP(varStack.getSP());
+			}
+			//申请变量空间
+			varStack.setSP(varStack.getSP() + stackFrameTable->items[ir.operand1]->size);
+
+			frameStack.push_back(item);
+		}
+		break;
+		case OPCODE::pop_stack_map:
+		{
+			pop_stack_map(ir.operand1, false);
+		}
+		break;
+
+		case OPCODE::push_unwind:
+		{
+			auto point = calculateStack.pop64();
+			unwindHandler.push(point);
+		}
+		break;
+		case OPCODE::pop_unwind:
+		{
+			auto handler = unwindHandler.pop64();
+			calculateStack.push(handler);
+			unwindNumStack.push(unwindNumStack.pop64() - 1);
+		}
+		break;
+		case OPCODE::if_unneed_unwind:
+		{
+			if (unwindNumStack.top64() == 0)
+			{
+				pc = pc + ir.operand1 - 1;
+				unwindNumStack.pop64();
+			}
+		}
+		break;
+
+		case OPCODE::push_catch_block:
+		{
+			calculateStack.push(ir.operand1);
+			calculateStack.push(ir.operand2);
+		}
+		break;
+		case OPCODE::save_catch_point:
+		{
+			Catch_point point;
+			for (u64 i = 0; i < ir.operand1; i++)
+			{
+				auto type = calculateStack.pop64();
+				auto irAddress = calculateStack.pop64();//intermedial represent
+				Catch_item item;
+				item.type = type;
+				item.irAddress = irAddress;
+				point.type_list.push_back(item);
+			}
+			point.varBP = varStack.getBP();
+			point.varSP = varStack.getSP();
+			point.frameLevel = frameStack.size();
+			point.callStackSP = callStack.getSP();
+			catchStack.push(point);
+		}
+		break;
+		case OPCODE::clear_calculate_stack:
+		{
+			calculateStack.setSP(0);
+		}
+		break;
+		case OPCODE::_throw:
+		{
+			_throw(ir.operand1);
+		}
+		break;
+
+		case OPCODE::clear_VM_Error_flag:
+		{
+			VMError = false;
+		}
+		break;
+
+		case OPCODE::store_VM_Error:
+		{
+			auto error = calculateStack.pop64();
+			calculateStack.setSP(0);
+			calculateStack.push(error);
+		}
+		break;
+		case OPCODE::ret:
+		{
+			if (callStack.getBP() == 0 && callStack.getSP() == 0)
+			{
+				setSafePoint();
+				goto __exit;
+			}
+			else
+			{
+				pc = callStack.pop64();
+			}
+		}
+		break;
+		case OPCODE::__exit:
+		{
+			setSafePoint(true);//进入安全点，等待GC线程结束
+		}
+		break;
+
+		default:
+		{
+			throw "unimplement";
+		}
+		break;
+		}
+		if (calculateStack.getSP() == 0)//如果一行语句结束(计算栈没有内容)，则尝试进行GC
+		{
+			setSafePoint();
+		}
 	}
 __exit:
+	return;
+}
+void VM::stackBalancingCheck()
+{
 	if (callStack.getBP() != 0 || callStack.getSP() != 0)
 	{
 		throw "栈不平衡";
@@ -1816,7 +1839,13 @@ __exit:
 		throw "栈不平衡";
 	}
 }
-
+void VM::gcCheck()
+{
+	if (!heap.empty())
+	{
+		throw "GC没有回收全部对象";
+	}
+}
 void VM::sweep()
 {
 	auto garbageCounter = 0;
@@ -1833,7 +1862,10 @@ void VM::sweep()
 			it++;
 		}
 	}
-	//std::cout << "gc数量:" << garbageCounter << std::endl;
+	//if (garbageCounter != 0)
+	//{
+	//	std::cout << "gc数量:" << garbageCounter << std::endl;
+	//}
 }
 
 
@@ -2086,23 +2118,44 @@ bool VM::mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 	}
 }
 
-void VM::setSafePoint()
+void VM::setSafePoint(bool isExit)
 {
 	isSafePoint = true;
 	if (!waitGC.try_lock())//如果GC线程已经在等待GC了，则等待GC完毕再返回
 	{
 		waitGC.lock();//等待
 	}
-	waitGC.unlock();
+	if (isExit)
+	{
+		//此时已经拿到锁了
+		gcExit = true;
+		waitGC.unlock();//让GC线程再跑一下
+		for (;;)
+		{
+			if (gcExit)//等待GC线程成功把信号设置
+			{
+				std::this_thread::yield();
+			}
+			else
+			{
+				exit(0);//结束程序
+			}
+		}
+	}
 	isSafePoint = false;
+	waitGC.unlock();
 }
 
 void VM::gc()
 {
-	int i = 0;
 	for (;;) {
-		std::cout << i++ << std::endl;
 		waitGC.lock();
+		if (gcExit)
+		{
+			gcExit = false;//产生一个跳动信号
+			waitGC.unlock();
+			return;
+		}
 		//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
 		if (heap.size() >= GCcondition)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 		{
@@ -2113,25 +2166,6 @@ void VM::gc()
 					std::this_thread::yield();
 				}
 			}
-
-
-			for (auto it1 = VMs.begin(); it1 != VMs.end(); it1++) {
-				VM& vm = *(*it1);
-				for (
-					auto it = vm.frameStack.rbegin();
-					it != vm.frameStack.rend();
-					it++)//逆序遍历
-				{
-					//把变量栈中所有指针放入GCRoot
-					FrameItem frameItem = *it;
-				}
-			}
-
-
-
-
-
-
 
 			std::list<HeapItem*> GCRoots;
 			/*下面的代码先标记program，然后对当前VM的变量栈进行分析*/
@@ -2150,10 +2184,11 @@ void VM::gc()
 			sweep();
 		}
 		waitGC.unlock();
-		//std::this_thread::sleep_for(std::chrono::seconds(1));
 	}
 }
 VM::~VM()
 {
+	VM::waitGC.lock();
 	VMs.erase(this);
+	VM::waitGC.unlock();
 }

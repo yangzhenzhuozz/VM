@@ -16,8 +16,7 @@
 #include <set>
 #include <atomic>
 #include <mutex>
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include <windows.h>
 struct Catch_item
 {
 	u64 irAddress = 0;

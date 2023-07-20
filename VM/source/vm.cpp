@@ -8,7 +8,7 @@
 u64 VM::program;
 std::list<HeapItem*> VM::heap;
 i32 VM::gcCounter = 0;
-int VM::GCcondition = 0;
+int VM::GCcondition = 10000;
 std::set<VM*> VM::VMs;
 std::mutex VM::waitGC;
 
@@ -76,8 +76,9 @@ void VM::_NativeCall(u64 NativeIndex)
 		auto handle = LoadLibrary(fileName);
 		if (handle == nullptr)
 		{
-			snprintf(errMsg, sizeof(errMsg), "加载动态库:%s 失败", fileName);;
-			throw errMsg;
+			snprintf(errMsg, sizeof(errMsg), "加载动态库:%s 失败", fileName);
+			std::cerr << errMsg << std::endl;
+			abort();
 		}
 		for (u64 i = 0; i < arg1->sol.length; i++)
 		{
@@ -89,7 +90,8 @@ void VM::_NativeCall(u64 NativeIndex)
 			if (functionPointer == nullptr)
 			{
 				snprintf(errMsg, sizeof(errMsg), "加载函数:%s 失败", functionName);;
-				throw errMsg;
+				std::cerr << errMsg << std::endl;
+				abort();
 			}
 			if (nativeTable->nativeMap.count(functionName) != 0)//如果这个函数在源码中有定义
 			{
@@ -110,7 +112,8 @@ void VM::_NativeCall(u64 NativeIndex)
 		if (nativeTable->items[NativeIndex].realAddress == 0)
 		{
 			snprintf(errMsg, sizeof(errMsg), "本地函数:%s 不存在,请检查是否已经使用VMLoadNativeLib函数加载对应的动态链接库", stringPool->items[nativeTable->items[NativeIndex].name]);;
-			throw errMsg;
+			std::cerr << errMsg << std::endl;
+			abort();
 		}
 		else
 		{
@@ -174,7 +177,8 @@ void VM::_NativeCall(u64 NativeIndex)
 			}
 			else
 			{
-				throw "FFI参数错误";
+				std::cerr << "FFI参数错误" << std::endl;
+				abort();
 			}
 
 
@@ -272,7 +276,7 @@ void VM::pop_stack_map(u64 level, bool isThrowPopup)
 
 		if (!isThrowPopup)
 		{
-			//只有正常的pop_stack_map指令需要检查，由throw导致的栈回退不需要检查isTryBlock
+			//只有正常的pop_stack_map指令需要检查，由_throw导致的栈回退不需要检查isTryBlock
 			if (isTryBlock != 0)
 			{
 				//如果是catch块的frame,则弹出
@@ -347,7 +351,8 @@ void VM::_new(u64 type)
 	}
 	else
 	{
-		throw "value type cann't new";
+		std::cerr << "value type cann't new" << std::endl;
+		abort();
 	}
 }
 
@@ -359,7 +364,8 @@ void VM::_throw(u64 type)
 		{
 			char msgdBuf[1024];
 			snprintf(msgdBuf, sizeof(msgdBuf), "unfind catch block match the type : %s", stringPool->items[typeTable->items[type].name]);//vm级别错误
-			throw msgdBuf;
+			std::cerr << msgdBuf << std::endl;
+			abort();
 		}
 		Catch_point catch_point = catchStack.top();
 		catchStack.pop();
@@ -381,7 +387,8 @@ void VM::_VMThrowError(u64 type, u64 init, u64 constructor)
 {
 	if (VMError)
 	{
-		throw "双重错误";
+		std::cerr << "双重错误" << std::endl;
+		abort();
 	}
 	calculateStack.setSP(0);//清空计算栈
 	_new(type);//为空指针异常对象申请内存
@@ -431,10 +438,10 @@ void VM::run()
 			calculateStack.push((u64)heapitem->data);
 			heapitem->gcMark = gcCounter - 1;
 			heap.push_back(heapitem);
-			if (heapitem->text == 0)
-			{
-				throw "error";
-			}
+			//if (heapitem->text == 0)
+			//{
+			//	_throw "error";
+			//}
 		}
 		break;
 		case OPCODE::newArray:
@@ -1357,10 +1364,10 @@ void VM::run()
 			{
 				callStack.push(pc);
 				HeapItem* heapItem = (HeapItem*)(functionObj - sizeof(HeapItem));
-				if (heapItem->text == 0)
-				{
-					throw "error";
-				}
+				//if (heapItem->text == 0)
+				//{
+				//	_throw "error";
+				//}
 				pc = heapItem->text - 1;
 			}
 		}
@@ -1605,7 +1612,8 @@ void VM::run()
 			}
 			else
 			{
-				throw "value type cann box only";
+				std::cerr << "value type cann box only" << std::endl;
+				abort();
 			}
 		}
 		break;
@@ -1800,7 +1808,8 @@ void VM::run()
 
 		default:
 		{
-			throw "unimplement";
+			std::cerr << "未实现的字节码指令" << std::endl;
+			abort();
 		}
 		break;
 		}
@@ -1816,34 +1825,41 @@ void VM::stackBalancingCheck()
 {
 	if (callStack.getBP() != 0 || callStack.getSP() != 0)
 	{
-		throw "栈不平衡";
+		std::cerr << "栈不平衡" << std::endl;
+		abort();
 	}
 	if (calculateStack.getBP() != 0 || calculateStack.getSP() != 0)
 	{
-		throw "栈不平衡";
+		std::cerr << "栈不平衡" << std::endl;
+		abort();
 	}
 	if (varStack.getBP() != 0 || varStack.getSP() != 0)
 	{
-		throw "栈不平衡";
+		std::cerr << "栈不平衡" << std::endl;
+		abort();
 	}
 	if (frameStack.size() != 0)
 	{
-		throw "栈不平衡";
+		std::cerr << "栈不平衡" << std::endl;
+		abort();
 	}
 	if (unwindNumStack.getBP() != 0 || unwindNumStack.getSP() != 0)
 	{
-		throw "栈不平衡";
+		std::cerr << "栈不平衡" << std::endl;
+		abort();
 	}
 	if (unwindHandler.getBP() != 0 || unwindHandler.getSP() != 0)
 	{
-		throw "栈不平衡";
+		std::cerr << "栈不平衡" << std::endl;
+		abort();
 	}
 }
 void VM::gcCheck()
 {
 	if (!heap.empty())
 	{
-		throw "GC没有回收全部对象";
+		std::cerr << "GC没有回收全部对象" << std::endl;
+		abort();
 	}
 }
 void VM::sweep()
@@ -2149,6 +2165,7 @@ void VM::setSafePoint(bool isExit)
 void VM::gc()
 {
 	for (;;) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
 		waitGC.lock();
 		if (gcExit)
 		{

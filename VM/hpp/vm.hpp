@@ -98,7 +98,7 @@ private:
 	static void GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,会标记所有能访问到的对象
 	static void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
 	static void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
-	static bool mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//用于操作一个可达对象，将可达对象的gc计数器设置为当前的gcCounter
+	static bool mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//用于操作一个可达对象，将可达对象的gc计数器设置为当前的gcCounter,同时也能标记出循环引用的对象
 	static void sweep();//清除garbage
 
 };

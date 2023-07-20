@@ -16,7 +16,7 @@ int main(int argc, char** argv)
 		if (strcmp(argv[i], "-GC") == 0)
 		{
 			i++;
-			sscanf(argv[i], "%d", &VM::GCcondition);
+			std::ignore = sscanf(argv[i], "%d", &VM::GCcondition);
 		}
 		else
 		{

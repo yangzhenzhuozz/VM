@@ -42,6 +42,7 @@ VM::VM() :
 	unwindHandler(Stack()),
 	unwindNumStack(Stack())
 {
+ //这里不需要抢占gc线程的锁，因为只有两个地方会创建vm实例，主线程是先创建vm之后才创建gc线程，而fork的时候当前线程一定是处于非安全点中
 	VMs.insert(this);
 }
 void VM::_NativeCall(u64 NativeIndex)

@@ -8,7 +8,7 @@
 u64 VM::program;
 std::list<HeapItem*> VM::heap;
 i32 VM::gcCounter = 0;
-int VM::GCcondition = 10000;
+int VM::GCcondition = 1000;
 std::set<VM*> VM::VMs;
 std::mutex VM::waitGC;
 
@@ -107,6 +107,27 @@ void VM::_NativeCall(u64 NativeIndex)
 		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
 		fork(arg0);
 	}
+	else if (NativeIndex == nativeTable->system_yield)
+	{
+		yield = true;
+	}
+	else if (NativeIndex == nativeTable->system_getCurrentThread)
+	{
+		if (currentThread == nullptr)
+		{
+			std::cerr << "还没有为VM设置当前线程" << std::endl;
+			abort();
+		}
+		*(u64*)resultBuffer = (u64)(&currentThread->data);
+		//写回计算结果
+		memcpy(calculateStack.getBufferAddress() + calculateStack.getSP(), resultBuffer, resultSize);
+		calculateStack.setSP(calculateStack.getSP() + resultSize);
+	}
+	else if (NativeIndex == nativeTable->system_setCurrentThread)
+	{
+		auto it = argumentsBuffer.begin();
+		currentThread = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
+	}
 	else
 	{
 		if (nativeTable->items[NativeIndex].realAddress == 0)
@@ -197,27 +218,18 @@ void VM::_NativeCall(u64 NativeIndex)
 			delete[] args;
 
 		}
-	}
 
-	//写回计算结果
-	memcpy(calculateStack.getBufferAddress() + calculateStack.getSP(), resultBuffer, resultSize);
-	calculateStack.setSP(calculateStack.getSP() + resultSize);
+		//写回计算结果
+		memcpy(calculateStack.getBufferAddress() + calculateStack.getSP(), resultBuffer, resultSize);
+		calculateStack.setSP(calculateStack.getSP() + resultSize);
+	}
 
 	//释放参数缓存
 	for (auto it = argumentsBuffer.begin(); it != argumentsBuffer.end(); it++)
 	{
 		delete[] * it;
 	}
-	//如果返回的是一个引用类型，则将其录入heap中，否则释放内存
-	if (nativeTable->items[NativeIndex].resultIsValueType != 1)
-	{
-		((HeapItem*)resultBuffer)->gcMark = gcCounter - 1;
-		heap.push_back((HeapItem*)resultBuffer);
-	}
-	else
-	{
-		delete[] resultBuffer;
-	}
+	delete[] resultBuffer;
 }
 
 
@@ -412,8 +424,10 @@ void VM::run()
 	* 比如系统触发了一个NullPointException，然后在构造NullPointException的时候又触发异常，直接GG，根本无法抢救
 	* 这里指的都是VM自身产生的异常，用户代码产生的异常不在此列
 	*/
+	int count = 0;
 	for (; pc < irs->length; pc++)
 	{
+		count++;
 		auto& ir = irs->items[pc];
 		switch (ir.opcode)
 		{
@@ -1791,6 +1805,7 @@ void VM::run()
 		{
 			if (callStack.getBP() == 0 && callStack.getSP() == 0)
 			{
+				//这代表了当前线程已经结束
 				setSafePoint();
 				goto __exit;
 			}
@@ -2137,6 +2152,11 @@ bool VM::mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 void VM::setSafePoint(bool isExit)
 {
 	isSafePoint = true;
+	if (yield)
+	{
+		yield = false;
+		std::this_thread::yield();//此时已经进入安全点,即使yield,GC线程也能正常工作
+	}
 	if (!waitGC.try_lock())//如果GC线程已经在等待GC了，则等待GC完毕再返回
 	{
 		waitGC.lock();//等待
@@ -2161,7 +2181,14 @@ void VM::setSafePoint(bool isExit)
 	isSafePoint = false;
 	waitGC.unlock();
 }
-
+void VM::addObjectToGCRoot(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
+{
+	if (mark(GCRoots, pointer))
+	{
+		auto realType = pointer->typeDesc.innerType;//元素的真实类型
+		GCClassFieldAnalyze(GCRoots, (u64)pointer->data, realType);
+	}
+}
 void VM::gc()
 {
 	for (;;) {
@@ -2176,24 +2203,26 @@ void VM::gc()
 		//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
 		if (heap.size() >= GCcondition)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 		{
+			gcCounter++;
+			std::list<HeapItem*> GCRoots;
+
 			for (auto it = VMs.begin(); it != VMs.end(); it++)//等待所有的线程都进入safePoint
 			{
 				for (; !(*it)->isSafePoint;)
 				{
 					std::this_thread::yield();
 				}
+				HeapItem* currentThread = (*it)->currentThread;
+				if (currentThread != nullptr) //因为主线程在最开始还没有创建Thread
+				{
+					addObjectToGCRoot(GCRoots, currentThread);
+				}
 			}
 
-			std::list<HeapItem*> GCRoots;
 			/*下面的代码先标记program，然后对当前VM的变量栈进行分析*/
-			gcCounter++;
 			if (program != 0)
 			{
-				if (mark(GCRoots, (HeapItem*)(program - sizeof(HeapItem))))
-				{
-					auto realType = ((HeapItem*)(program - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
-					GCClassFieldAnalyze(GCRoots, program, realType);
-				}
+				addObjectToGCRoot(GCRoots, (HeapItem*)(program - sizeof(HeapItem)));
 			}
 			for (auto it = VMs.begin(); it != VMs.end(); it++) {
 				GCRootsSearch(**it, GCRoots);

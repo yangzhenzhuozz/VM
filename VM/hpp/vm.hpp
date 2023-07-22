@@ -42,7 +42,7 @@ class VM
 {
 public:
 	static i32 gcCounter;//允许溢出，每次执行gc的时候，计数器+1
-	static  std::list<HeapItem*> heap;//因为要删除中间的对象，所以用list
+	static std::list<HeapItem*> heap;//因为要删除中间的对象，所以用list
 	static u64 program;//全局的parogram对象
 	static int GCcondition;//触发GC的对象数量
 	static std::set<VM*> VMs;//已经创建的VM列表
@@ -57,6 +57,7 @@ public:
 	static NativeTable* nativeTable;
 
 	static void gc();
+	static void addObjectToGCRoot(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//把不需要GC的对象放入GCRoot中
 	static volatile bool gcExit;//用于通知GC线程结束运行
 
 	void stackBalancingCheck();
@@ -69,6 +70,7 @@ public:
 
 private:
 	volatile bool isSafePoint = false;
+	bool yield = false;
 
 	Stack varStack;
 	Stack calculateStack;
@@ -82,6 +84,7 @@ private:
 
 	u64 pc = 0;
 
+	HeapItem* currentThread = nullptr;//当前线程的thread
 
 	bool VMError = false;
 
@@ -90,14 +93,14 @@ private:
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);
 	void _new(u64 type);
-	void setSafePoint(bool isExit=false);//设置安全点
+	void setSafePoint(bool isExit = false);//设置安全点
 	void _NativeCall(u64 index);
 	void fork(HeapItem* funObj);
 
 	static void GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,会标记所有能访问到的对象
 	static void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
 	static void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
-	static bool mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//用于操作一个可达对象，将可达对象的gc计数器设置为当前的gcCounter,同时也能标记出循环引用的对象
+	static bool mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//用于标记一个可达对象，将可达对象的gc计数器设置为当前的gcCounter,同时也能标记出循环引用的对象(如果一个对象已经被标记，则返回false，避免在循环引用对象中进行循环标记)
 	static void sweep();//清除garbage
 
 };

@@ -43,6 +43,18 @@ NativeTable::NativeTable(const char* filename, StringPool& stringPool)
         {
             system_fork = itemIndex;
         }
+        else if (strcmp("system_yield", stringPool.items[name]) == 0)
+        {
+            system_yield = itemIndex;
+        }
+        else if (strcmp("system_getCurrentThread", stringPool.items[name]) == 0)
+        {
+            system_getCurrentThread = itemIndex;
+        }
+        else if (strcmp("system_setCurrentThread", stringPool.items[name]) == 0)
+        {
+            system_setCurrentThread = itemIndex;
+        }
         nativeMap[stringPool.items[name]] = itemIndex;
         itemIndex++;
         if (fin.tellg() == pos) {

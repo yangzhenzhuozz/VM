@@ -1,4 +1,6 @@
-﻿//这个头文件由VM向外部提供,创建自己的dll时可以引用此文件
+﻿//目前外部函数不应该返回HeapItem指针，因为外部返回的数据无法被GC管理，后续可以考虑由VM提供new函数
+
+//这个头文件由VM向外部提供,创建自己的dll时可以引用此文件
 #ifndef _BRIDGE
 #define _BRIDGE
 #include "cstdint"

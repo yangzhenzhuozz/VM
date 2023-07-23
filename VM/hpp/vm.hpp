@@ -91,7 +91,7 @@ private:
 
 	bool VMError = false;
 
-	u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);
+	u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);//数组类型，创建参数如创建一个三维数组[1][2][3]，参数长度，当前层级
 	
 	void _throw(u64 type);
 	void _VMThrowError(u64 type, u64 init, u64 constructor);

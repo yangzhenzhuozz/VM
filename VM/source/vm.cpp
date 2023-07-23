@@ -39,7 +39,9 @@ u64 VM::addNativeResourcePointer(u64 p, u64 freeCB)
 	return (u64)heapitem->data;
 }
 
-VMStaticExport::VM vmExport{(VMStaticExport::u64 (__cdecl*)(VMStaticExport::tlong, VMStaticExport::tlong))VM::addNativeResourcePointer};//强制转型并初始化
+VMStaticExport::VM vmExport{
+	(VMStaticExport::u64(__cdecl*)(VMStaticExport::tlong, VMStaticExport::tlong))VM::addNativeResourcePointer
+};//强制转型并初始化
 
 void VM::fork(HeapItem* funObj)
 {

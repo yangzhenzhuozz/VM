@@ -52,7 +52,8 @@ namespace VMStaticExport {
 
 	struct VM
 	{
-		tpointer (*addNativeResourcePointer)(tlong p, tlong freeCB);
+		//不提供创建数组的方法，因为这个数组类型也许在类型表里面还没有注册,比如int[]，假设源码没有出现过，那么typeTable和classTable都不会有这个类型，要创建的话还需要修改这两个表，太麻烦了
+		tpointer(*addNativeResourcePointer)(tlong p, tlong freeCB);
 	};
 }
 #endif // !_BRIDGE

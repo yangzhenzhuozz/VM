@@ -4,13 +4,13 @@
 using namespace VMStaticExport;
 
 
-void freeMutex(tlong p)
+void freeMutex(tpointer p)
 {
 	delete (std::mutex*)p;
 }
 
-extern "C" __declspec(dllimport) tlong system_dispatcher_generateMutex(VM * vm);
-tlong system_dispatcher_generateMutex(VM* vm)
+extern "C" __declspec(dllimport) tpointer system_dispatcher_generateMutex(VM * vm);
+tpointer system_dispatcher_generateMutex(VM* vm)
 {
 	std::mutex* p = new std::mutex;
 	return vm->addNativeResourcePointer((tlong)p, (tlong)freeMutex);

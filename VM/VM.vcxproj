@@ -32,6 +32,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="hpp\classTable.hpp" />
+    <ClInclude Include="hpp\concurrentContainer.hpp" />
     <ClInclude Include="hpp\environment.hpp" />
     <ClInclude Include="hpp\heap.hpp" />
     <ClInclude Include="hpp\ir.hpp" />

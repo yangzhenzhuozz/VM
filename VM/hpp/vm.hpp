@@ -11,6 +11,7 @@
 #include "./vm.hpp"
 #include "./heap.hpp"
 #include "./nativeTable.hpp"
+#include "./concurrentContainer.hpp"
 #include <stack>
 #include <list>
 #include <set>
@@ -42,7 +43,7 @@ class VM
 {
 public:
 	static i32 gcCounter;//允许溢出，每次执行gc的时候，计数器+1
-	static std::list<HeapItem*> heap;//因为要删除中间的对象，所以用list
+	static list_safe<HeapItem*> heap;//因为要删除中间的对象，所以用list
 	static u64 program;//全局的parogram对象
 	static int GCcondition;//触发GC的对象数量
 	static std::set<VM*> VMs;//已经创建的VM列表
@@ -89,6 +90,7 @@ private:
 	bool VMError = false;
 
 	u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);
+	HeapItem* addNativeResourcePointer(u64 p);//把一个native资源指针加入GC管理队列
 	void _throw(u64 type);
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);

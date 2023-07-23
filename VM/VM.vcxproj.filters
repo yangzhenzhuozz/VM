@@ -86,5 +86,8 @@
     <ClInclude Include="hpp\vm.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="hpp\concurrentContainer.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

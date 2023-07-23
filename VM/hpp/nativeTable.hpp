@@ -29,6 +29,7 @@ public:
 	u64 system_yield = (u64)-1;//VM内置的一个native函数
 	u64 system_getCurrentThread = (u64)-1;//VM内置的一个native函数
 	u64 system_setCurrentThread = (u64)-1;//VM内置的一个native函数
+	u64 system_allocMutex=-1;//VM内置的一个native函数
 
 	std::vector<NativeTableItem> items;
 	NativeTable(const char* filename, StringPool& stringPool);

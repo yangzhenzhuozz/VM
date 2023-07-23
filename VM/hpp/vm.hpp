@@ -61,7 +61,7 @@ public:
 	static void addObjectToGCRoot(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//把不需要GC的对象放入GCRoot中
 	static volatile bool gcExit;//用于通知GC线程结束运行
 
-	static HeapItem* addNativeResourcePointer(u64 p, u64 freeCB);//把一个native资源指针加入GC管理队列,第二个参数是GC时的回调函数
+	static u64 addNativeResourcePointer(u64 p, u64 freeCB);//把一个native资源指针加入GC管理队列,第二个参数是GC时的回调函数
 
 	void stackBalancingCheck();
 	void gcCheck();

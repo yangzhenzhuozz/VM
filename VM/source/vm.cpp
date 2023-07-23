@@ -23,7 +23,7 @@ NativeTable* VM::nativeTable;
 
 volatile bool VM::gcExit = false;
 
-HeapItem* VM::addNativeResourcePointer(u64 p, u64 freeCB)
+u64 VM::addNativeResourcePointer(u64 p, u64 freeCB)
 {
 	u64 dataSize = sizeof(u64);//8字节
 	HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
@@ -36,10 +36,10 @@ HeapItem* VM::addNativeResourcePointer(u64 p, u64 freeCB)
 	heapitem->NativeResourceFreeCallBack = freeCB;
 
 	heap.push_back(heapitem);
-	return heapitem;
+	return (u64)heapitem->data;
 }
 
-VMStaticExport::VM vmExport{(VMStaticExport::HeapItem* (__cdecl*)(VMStaticExport::tlong, VMStaticExport::tlong))VM::addNativeResourcePointer};//强制转型并初始化
+VMStaticExport::VM vmExport{(VMStaticExport::u64 (__cdecl*)(VMStaticExport::tlong, VMStaticExport::tlong))VM::addNativeResourcePointer};//强制转型并初始化
 
 void VM::fork(HeapItem* funObj)
 {

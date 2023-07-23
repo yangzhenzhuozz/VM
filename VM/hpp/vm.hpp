@@ -61,6 +61,8 @@ public:
 	static void addObjectToGCRoot(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//把不需要GC的对象放入GCRoot中
 	static volatile bool gcExit;//用于通知GC线程结束运行
 
+	static HeapItem* addNativeResourcePointer(u64 p, u64 freeCB);//把一个native资源指针加入GC管理队列,第二个参数是GC时的回调函数
+
 	void stackBalancingCheck();
 	void gcCheck();
 
@@ -90,7 +92,7 @@ private:
 	bool VMError = false;
 
 	u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);
-	HeapItem* addNativeResourcePointer(u64 p);//把一个native资源指针加入GC管理队列
+	
 	void _throw(u64 type);
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);
@@ -99,7 +101,7 @@ private:
 	void _NativeCall(u64 index);
 	void fork(HeapItem* funObj);
 
-	static void GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,会标记所有能访问到的对象
+	static void VariableStackAnalysis(VM& vm, std::list<HeapItem*>& GCRoots);//使用广度优先搜索标记对象,标记当前线程的变量栈
 	static void GCClassFieldAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress, u64 classIndex);//分析一个对象，把内部的所有引用类型添加到GCRoots
 	static void GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress);//分析一个数组，把内部的所有引用类型添加到GCRoots
 	static bool mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer);//用于标记一个可达对象，将可达对象的gc计数器设置为当前的gcCounter,同时也能标记出循环引用的对象(如果一个对象已经被标记，则返回false，避免在循环引用对象中进行循环标记)

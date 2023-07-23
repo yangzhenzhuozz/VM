@@ -4,6 +4,7 @@
 #include <thread>
 #include <chrono>
 #include <ffi.h>
+#include "../bridge/bridge.hpp"
 
 u64 VM::program;
 list_safe<HeapItem*> VM::heap;
@@ -21,6 +22,24 @@ IRs* VM::irs;
 NativeTable* VM::nativeTable;
 
 volatile bool VM::gcExit = false;
+
+HeapItem* VM::addNativeResourcePointer(u64 p, u64 freeCB)
+{
+	u64 dataSize = sizeof(u64);//8字节
+	HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
+	*(u64*)heapitem->data = (u64)p;
+
+	auto& typeDesc = typeTable->items[classTable->system_object];
+	heapitem->sol.size = dataSize;
+	heapitem->gcMark = gcCounter - 1;
+	heapitem->isNativeResouce = true;
+	heapitem->NativeResourceFreeCallBack = freeCB;
+
+	heap.push_back(heapitem);
+	return heapitem;
+}
+
+VMStaticExport::VM vmExport{(VMStaticExport::HeapItem* (__cdecl*)(VMStaticExport::tlong, VMStaticExport::tlong))VM::addNativeResourcePointer};//强制转型并初始化
 
 void VM::fork(HeapItem* funObj)
 {
@@ -45,21 +64,7 @@ VM::VM() :
 	//这里不需要抢占gc线程的锁，因为只有两个地方会创建vm实例，主线程是先创建vm之后才创建gc线程，而fork的时候当前线程一定是处于非安全点中
 	VMs.insert(this);
 }
-HeapItem* VM::addNativeResourcePointer(u64 p)
-{
-	u64 dataSize = sizeof(u64);//8字节
-	HeapItem* heapitem = (HeapItem*)new char[sizeof(HeapItem) + dataSize];
-	*(u64*)heapitem->data = (u64)p;
 
-	auto& typeDesc = typeTable->items[classTable->system_object];
-	heapitem->sol.size = dataSize;
-	heapitem->gcMark = gcCounter - 1;
-	heapitem->isNativeResouce = true;
-	heapitem->nativeType = NativeResourceType::mutex;
-
-	heap.push_back(heapitem);
-	return heapitem;
-}
 void VM::_NativeCall(u64 NativeIndex)
 {
 	std::list<char*> argumentsBuffer;
@@ -144,12 +149,6 @@ void VM::_NativeCall(u64 NativeIndex)
 		auto it = argumentsBuffer.begin();
 		currentThread = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
 	}
-	else if (NativeIndex == nativeTable->system_allocMutex)
-	{
-		std::mutex* p = new std::mutex;
-		HeapItem* heapitem = addNativeResourcePointer((u64)p);
-		calculateStack.push((u64)heapitem->data);
-	}
 	else
 	{
 		if (nativeTable->items[NativeIndex].realAddress == 0)
@@ -160,8 +159,8 @@ void VM::_NativeCall(u64 NativeIndex)
 		}
 		else
 		{
-			char** args = new char* [argLen];//准备参数
-			ffi_type** argTyeps = new ffi_type * [argLen];//准备参数类型
+			char** args = new char* [argLen + 1];//准备参数,+1是因为后面会带上一个VM指针
+			ffi_type** argTyeps = new ffi_type * [argLen + 1];//准备参数类型
 			auto it = argumentsBuffer.begin();
 			for (int argInex = 0; argInex < argLen; argInex++, it++)
 			{
@@ -188,6 +187,13 @@ void VM::_NativeCall(u64 NativeIndex)
 				(*(argTyeps[argInex])).elements = elements;
 			}
 
+			//准备VM指针
+			char* vmExportBuf = new char[sizeof(u64)];
+			*(u64*)vmExportBuf = (u64)&vmExport;
+			args[argLen] = vmExportBuf;
+			argTyeps[argLen] = &ffi_type_uint64;
+
+
 			ffi_type retType;//返回值类型声明
 			if (resultSize == 0)
 			{
@@ -213,7 +219,7 @@ void VM::_NativeCall(u64 NativeIndex)
 
 			ffi_cif cif;
 			//根据参数和返回值类型，设置cif模板
-			if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen, &retType, argTyeps) == FFI_OK)
+			if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)argLen + 1, &retType, argTyeps) == FFI_OK)
 			{
 				//使用cif函数签名信息，调用函数
 				ffi_call(&cif, (void (*)(void)) nativeTable->items[NativeIndex].realAddress, resultBuffer, (void**)args);
@@ -238,9 +244,9 @@ void VM::_NativeCall(u64 NativeIndex)
 			}
 			delete[] argTyeps;
 			delete[] args;
+			delete[] vmExportBuf;
 
 		}
-
 		//写回计算结果
 		memcpy(calculateStack.getBufferAddress() + calculateStack.getSP(), resultBuffer, resultSize);
 		calculateStack.setSP(calculateStack.getSP() + resultSize);
@@ -1912,19 +1918,9 @@ void VM::sweep()
 		{
 			if ((*it)->isNativeResouce)
 			{
-				switch (((*it)->nativeType))
-				{
-				case NativeResourceType::mutex:
-				{
-					std::mutex* p = (std::mutex*)(*(u64*)(*it)->data);
-					delete p;
-				}
-				break;
-				default:
-					std::cout << "暂未支持的本地资源" << std::endl;
-					abort();
-					break;
-				}
+				u64 pointer = (*(u64*)(*it)->data);
+				u64 freeCallBack = ((*it)->NativeResourceFreeCallBack);
+				((void(*)(u64))freeCallBack)(pointer);
 			}
 			delete (*it);
 			heap.erase(it++);//STL坑点之一
@@ -2055,8 +2051,15 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 					{
 						if (mark(GCRoots, (HeapItem*)(obj - sizeof(HeapItem))))
 						{
-							auto realType = ((HeapItem*)(obj - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
-							GCClassFieldAnalyze(GCRoots, obj, realType);
+							if (((HeapItem*)(obj - sizeof(HeapItem)))->isNativeResouce)
+							{
+								//std::cout << "本地资源，无需遍历其内部属性" << std::endl;
+							}
+							else
+							{
+								auto realType = ((HeapItem*)(obj - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
+								GCClassFieldAnalyze(GCRoots, obj, realType);
+							}
 						}
 					}
 				}
@@ -2100,7 +2103,7 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 	}
 }
 //使用广度优先搜索标记对象
-void VM::GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots)
+void VM::VariableStackAnalysis(VM& vm, std::list<HeapItem*>& GCRoots)
 {
 	u64 bp = vm.varStack.getBP();
 	for (
@@ -2131,8 +2134,15 @@ void VM::GCRootsSearch(VM& vm, std::list<HeapItem*>& GCRoots)
 						{
 							if (mark(GCRoots, (HeapItem*)(obj - sizeof(HeapItem))))
 							{
-								auto realType = ((HeapItem*)(obj - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
-								GCClassFieldAnalyze(GCRoots, obj, realType);
+								if (((HeapItem*)(obj - sizeof(HeapItem)))->isNativeResouce)
+								{
+									//std::cout << "本地资源，无需遍历其内部属性" << std::endl;
+								}
+								else
+								{
+									auto realType = ((HeapItem*)(obj - sizeof(HeapItem)))->typeDesc.innerType;//元素的真实类型
+									GCClassFieldAnalyze(GCRoots, obj, realType);
+								}
 							}
 						}
 					}
@@ -2274,7 +2284,7 @@ void VM::gc()
 				addObjectToGCRoot(GCRoots, (HeapItem*)(program - sizeof(HeapItem)));
 			}
 			for (auto it = VMs.begin(); it != VMs.end(); it++) {
-				GCRootsSearch(**it, GCRoots);
+				VariableStackAnalysis(**it, GCRoots);
 			}
 			sweep();
 		}

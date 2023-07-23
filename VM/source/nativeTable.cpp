@@ -55,10 +55,6 @@ NativeTable::NativeTable(const char* filename, StringPool& stringPool)
         {
             system_setCurrentThread = itemIndex;
         }
-        else if (strcmp("system_allocMutex", stringPool.items[name]) == 0)
-        {
-            system_allocMutex = itemIndex;
-        }
         nativeMap[stringPool.items[name]] = itemIndex;
         itemIndex++;
         if (fin.tellg() == pos) {

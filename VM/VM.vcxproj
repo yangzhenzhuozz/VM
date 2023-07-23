@@ -31,6 +31,7 @@
     <ClCompile Include="source\vm.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="bridge\bridge.hpp" />
     <ClInclude Include="hpp\classTable.hpp" />
     <ClInclude Include="hpp\concurrentContainer.hpp" />
     <ClInclude Include="hpp\environment.hpp" />

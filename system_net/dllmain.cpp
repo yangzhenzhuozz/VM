@@ -6,9 +6,9 @@
 
 using namespace VMStaticExport;
 
-extern "C" __declspec(dllimport) tint system_net_ip2intNative(tpointer dataAdd, VM * vm);
+extern "C" __declspec(dllimport) tlong system_net_ip2longNative(tpointer dataAdd, VM * vm);
 
-tint system_net_ip2intNative(tpointer dataAdd, VM* vm)
+tlong system_net_ip2longNative(tpointer dataAdd, VM* vm)
 {
 	auto pointer = (HeapItem*)(dataAdd - sizeof(HeapItem));
 	auto buffer = new char[pointer->sol.length + 1];
@@ -30,8 +30,8 @@ void SocketClose(tpointer p)
 	delete (SOCKET*)p;
 }
 
-extern "C" __declspec(dllimport) tpointer system_net_createServerSocket(tint host, tint port, VM * vm);
-tpointer system_net_createServerSocket(tint host, tint port, VM* vm)
+extern "C" __declspec(dllimport) tpointer system_net_createServerSocket(tlong host, tint port, VM * vm);
+tpointer system_net_createServerSocket(tlong host, tint port, VM* vm)
 {
 	WSADATA wsa_data;
 	SOCKADDR_IN server_addr, client_addr;
@@ -76,7 +76,7 @@ extern "C" __declspec(dllimport) tpointer system_net_accept(tpointer dataAdd, VM
 tpointer system_net_accept(tpointer dataAdd, VM* vm)
 {
 	SOCKET server = *((SOCKET*)(*(u64*)dataAdd));
-	SOCKADDR_IN server_addr, client_addr;
+	SOCKADDR_IN client_addr;
 	int client_addr_size = sizeof(client_addr);
 	SOCKET client = accept(server, reinterpret_cast<SOCKADDR*>(&client_addr), &client_addr_size);
 	if (client == INVALID_SOCKET)
@@ -102,4 +102,53 @@ tint system_net_read(tpointer _scoket, tpointer buf, VM* vm)
 	SOCKET scoket = *((SOCKET*)(*(u64*)_scoket));
 	auto pointer = (HeapItem*)(buf - sizeof(HeapItem));
 	return recv(scoket, pointer->data, pointer->sol.length, 0);
+}
+
+extern "C" __declspec(dllimport) tlong system_net_getSocketAddress(tpointer _scoket, VM * vm);
+tlong system_net_getSocketAddress(tpointer _scoket, VM* vm)
+{
+	SOCKET scoket = *((SOCKET*)(*(u64*)_scoket));
+	struct sockaddr_in addr;
+	socklen_t addr_size = sizeof(struct sockaddr_in);
+	int res = getpeername(scoket, (struct sockaddr*)&addr, &addr_size);
+	if (res == 0)
+	{
+		return addr.sin_addr.S_un.S_addr;
+	}
+	else
+	{
+		return -1;
+	}
+}
+extern "C" __declspec(dllimport) tshort system_net_getSocketPort(tpointer _scoket, VM * vm);
+tshort system_net_getSocketPort(tpointer _scoket, VM* vm)
+{
+	SOCKET scoket = *((SOCKET*)(*(u64*)_scoket));
+	struct sockaddr_in addr;
+	socklen_t addr_size = sizeof(struct sockaddr_in);
+	int res = getpeername(scoket, (struct sockaddr*)&addr, &addr_size);
+	if (res == 0)
+	{
+		return addr.sin_port;
+	}
+	else
+	{
+		return 0;
+	}
+}
+extern "C" __declspec(dllimport) tshort system_net_getSocketFamily(tpointer _scoket, VM * vm);
+tshort system_net_getSocketFamily(tpointer _scoket, VM* vm)
+{
+	SOCKET scoket = *((SOCKET*)(*(u64*)_scoket));
+	struct sockaddr_in addr;
+	socklen_t addr_size = sizeof(struct sockaddr_in);
+	int res = getpeername(scoket, (struct sockaddr*)&addr, &addr_size);
+	if (res == 0)
+	{
+		return addr.sin_family;
+	}
+	else
+	{
+		return 0;
+	}
 }

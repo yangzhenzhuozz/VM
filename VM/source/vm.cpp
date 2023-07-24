@@ -407,9 +407,9 @@ void VM::_throw(u64 type)
 		if (catchStack.empty())
 		{
 			char msgdBuf[1024];
-			snprintf(msgdBuf, sizeof(msgdBuf), "unfind catch block match the type : %s", stringPool->items[typeTable->items[type].name]);//vm级别错误
+			snprintf(msgdBuf, sizeof(msgdBuf), "can not find catch block match the type : %s", stringPool->items[typeTable->items[type].name]);//vm级别错误
 			std::cerr << msgdBuf << std::endl;
-			abort();
+			entrySafePoint(true);
 		}
 		Catch_point catch_point = catchStack.top();
 		catchStack.pop();
@@ -1667,25 +1667,25 @@ void VM::run()
 		break;
 		case OPCODE::unbox:
 		{
-   u64 objAddress = calculateStack.pop64();
-   if( objAddress == 0)
-   {
-       _VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
-   }
-   else
-   {
-			    HeapItem* heapItem = (HeapItem*)(objAddress - sizeof(HeapItem));
-		     	TypeItem& srcTypeDesc = (*heapItem).typeDesc;
-     			TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
-	     		if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
+			u64 objAddress = calculateStack.pop64();
+			if (objAddress == 0)
 			{
-     				_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
+				_VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
 			}
 			else
 			{
-	      			calculateStack.push(heapItem->data, heapItem->sol.size);
+				HeapItem* heapItem = (HeapItem*)(objAddress - sizeof(HeapItem));
+				TypeItem& srcTypeDesc = (*heapItem).typeDesc;
+				TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
+				if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
+				{
+					_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
+				}
+				else
+				{
+					calculateStack.push(heapItem->data, heapItem->sol.size);
+				}
 			}
-   }
 		}
 		break;
 		case OPCODE::instanceof:
@@ -1848,7 +1848,7 @@ void VM::run()
 			if (callStack.getBP() == 0 && callStack.getSP() == 0)
 			{
 				//这代表了当前线程已经结束
-				setSafePoint();
+				entrySafePoint();
 				goto __exit;
 			}
 			else
@@ -1859,7 +1859,7 @@ void VM::run()
 		break;
 		case OPCODE::__exit:
 		{
-			setSafePoint(true);//进入安全点，等待GC线程结束
+			entrySafePoint(true);//进入安全点，等待GC线程结束
 		}
 		break;
 
@@ -1872,7 +1872,7 @@ void VM::run()
 		}
 		if (calculateStack.getSP() == 0)//如果一行语句结束(计算栈没有内容)，则尝试进行GC
 		{
-			setSafePoint();
+			entrySafePoint();
 		}
 	}
 __exit:
@@ -2218,7 +2218,7 @@ bool VM::mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 	}
 }
 
-void VM::setSafePoint(bool isExit)
+void VM::entrySafePoint(bool isExit)
 {
 	isSafePoint = true;
 	if (yield)

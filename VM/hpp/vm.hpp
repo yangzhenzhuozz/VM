@@ -97,7 +97,7 @@ private:
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);
 	void _new(u64 type);
-	void setSafePoint(bool isExit = false);//设置安全点
+	void entrySafePoint(bool isExit = false);//设置安全点
 	void _NativeCall(u64 index);
 	void fork(HeapItem* funObj);
 

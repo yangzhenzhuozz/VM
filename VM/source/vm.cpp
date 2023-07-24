@@ -1667,17 +1667,25 @@ void VM::run()
 		break;
 		case OPCODE::unbox:
 		{
-			HeapItem* heapItem = (HeapItem*)(calculateStack.pop64() - sizeof(HeapItem));
-			TypeItem& srcTypeDesc = (*heapItem).typeDesc;
-			TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
-			if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
+   u64 objAddress = calculateStack.pop64();
+   if( objAddress == 0)
+   {
+       _VMThrowError(typeTable->system_exception_NullPointerException, irs->NullPointerException_init, irs->NullPointerException_constructor);
+   }
+   else
+   {
+			    HeapItem* heapItem = (HeapItem*)(objAddress - sizeof(HeapItem));
+		     	TypeItem& srcTypeDesc = (*heapItem).typeDesc;
+     			TypeItem& targetTypeDesc = typeTable->items[ir.operand1];
+	     		if (srcTypeDesc.desc != targetTypeDesc.desc || srcTypeDesc.innerType != targetTypeDesc.innerType || srcTypeDesc.name != targetTypeDesc.name)
 			{
-				_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
+     				_VMThrowError(typeTable->system_exception_CastException, irs->CastException_init, irs->CastException_constructor);
 			}
 			else
 			{
-				calculateStack.push(heapItem->data, heapItem->sol.size);
+	      			calculateStack.push(heapItem->data, heapItem->sol.size);
 			}
+   }
 		}
 		break;
 		case OPCODE::instanceof:

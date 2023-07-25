@@ -431,6 +431,10 @@ void VM::_VMThrowError(u64 type, u64 init, u64 constructor)
 {
 	if (VMError)
 	{
+		/*
+		* 比如系统触发了一个NullPointException，然后在构造NullPointException的时候又触发异常，直接GG，根本无法抢救
+		* 这里指的都是VM自身产生的异常，用户代码产生的异常不在此列
+		*/
 		std::cerr << "双重错误" << std::endl;
 		abort();
 	}
@@ -452,14 +456,8 @@ void VM::_VMThrowError(u64 type, u64 init, u64 constructor)
 
 void VM::run()
 {
-	/*
-	* 比如系统触发了一个NullPointException，然后在构造NullPointException的时候又触发异常，直接GG，根本无法抢救
-	* 这里指的都是VM自身产生的异常，用户代码产生的异常不在此列
-	*/
-	int count = 0;
 	for (; pc < irs->length; pc++)
 	{
-		count++;
 		auto& ir = irs->items[pc];
 		switch (ir.opcode)
 		{

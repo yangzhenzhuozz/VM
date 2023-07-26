@@ -1422,7 +1422,7 @@ void VM::run()
 			frameStack.back().frameSP = frameStack.back().frameSP + ir.operand1;
 		}
 		break;
-		case OPCODE::alloc_pointer:
+		case OPCODE::alloc_null_pointer:
 		{
 			frameStack.back().frameSP = frameStack.back().frameSP + 8;
 			memset((char*)((u64)varStack.getBufferAddress() + varStack.getBP() + frameStack.back().frameSP - ir.operand1), 0x00, 8);

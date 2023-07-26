@@ -213,7 +213,7 @@ enum OPCODE : u64
         p_pop,//从计算栈中弹出指针
         __exit,//退出
         alloc,//申请局部变量空间(只有初始化值类型的局部变量时用到,frame自动增长size,在这条指令之后一定有p_pop，表示这个值类型已经init完毕，可以进行GC)
-        alloc_pointer,//生成null局部变量(置0,frame自动增长8)
+        alloc_null_pointer,//生成null局部变量(置0,frame自动增长8)
         access_array_length,//读取数组的length
         native_call,//调用native函数
 };

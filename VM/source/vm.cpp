@@ -442,7 +442,7 @@ void VM::_VMThrowError(u64 type, u64 init, u64 constructor)
 	_new(type);//为空指针异常对象申请内存
 
 	callStack.push(irs->VMThrow - 1);//使异常构造函数结束之后返回到VMThrow
-	varStack.setBP(varStack.getSP());
+
 
 	pc = irs->VMExceptionGen - 1;
 

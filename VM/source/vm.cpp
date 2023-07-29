@@ -86,7 +86,7 @@ void VM::_NativeCall(u64 NativeIndex)
 		calculateStack.setSP(calculateStack.getSP() - argSize);
 	}
 
-	if (NativeIndex == nativeTable->system_loadLibrary)
+	if (NativeIndex == nativeTable->system_VMLoadNativeLib)
 	{
 		auto it = argumentsBuffer.begin();
 		HeapItem* arg0 = (HeapItem*)(((u64*)(*it))[0] - sizeof(HeapItem));
@@ -1857,7 +1857,7 @@ void VM::run()
 		break;
 		case OPCODE::__exit:
 		{
-			entrySafePoint(true);//进入安全点，等待GC线程结束
+			entrySafePoint(true);//进入安全点，等待GC线程结束后并退出程序
 		}
 		break;
 
@@ -2232,7 +2232,7 @@ void VM::entrySafePoint(bool isExit)
 	{
 		//此时已经拿到锁了
 		gcExit = true;
-		waitGC.unlock();//让GC线程再跑一下
+		waitGC.unlock();//让GC线程再跑一次
 		for (;;)
 		{
 			if (gcExit)//等待GC线程成功把信号设置
@@ -2261,12 +2261,6 @@ void VM::gc()
 	for (;;) {
 		//std::this_thread::sleep_for(std::chrono::milliseconds(500));
 		waitGC.lock();
-		if (gcExit)
-		{
-			gcExit = false;//产生一个跳动信号
-			waitGC.unlock();
-			return;
-		}
 		//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
 		if (heap.size() >= GCcondition)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 		{
@@ -2295,6 +2289,12 @@ void VM::gc()
 				VariableStackAnalysis(**it, GCRoots);
 			}
 			sweep();
+		}
+		if (gcExit)
+		{
+			gcExit = false;//产生一个跳动信号
+			waitGC.unlock();
+			break;
 		}
 		waitGC.unlock();
 	}

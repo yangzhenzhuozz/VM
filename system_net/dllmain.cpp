@@ -27,14 +27,15 @@ tlong system_net_ip2longNative(tpointer dataAdd, VM* vm)
 void SocketClose(tpointer p)
 {
 	closesocket(*(SOCKET*)p);
+	WSACleanup();
 	delete (SOCKET*)p;
 }
 
-extern "C" __declspec(dllimport) tpointer system_net_createServerSocket(tlong host, tint port, VM * vm);
-tpointer system_net_createServerSocket(tlong host, tint port, VM* vm)
+extern "C" __declspec(dllimport) tpointer system_net_createServerSocket(tlong host, tshort port, VM * vm);
+tpointer system_net_createServerSocket(tlong host, tshort port, VM* vm)
 {
 	WSADATA wsa_data;
-	SOCKADDR_IN server_addr, client_addr;
+	SOCKADDR_IN server_addr;
 
 	int ret;
 	ret = WSAStartup(MAKEWORD(2, 2), &wsa_data);
@@ -63,6 +64,38 @@ tpointer system_net_createServerSocket(tlong host, tint port, VM* vm)
 	*socketBuf = server;
 	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketClose);
 }
+
+extern "C" __declspec(dllimport) tpointer system_net_createSocket(VM * vm);
+tpointer system_net_createSocket(VM* vm)
+{
+	WSADATA wsa_data;
+	int ret = WSAStartup(MAKEWORD(2, 0), &wsa_data);
+	if (ret < 0)
+	{
+		return 0;
+	}
+	SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
+	if (server == INVALID_SOCKET)
+	{
+		return 0;
+	}
+	SOCKET* socketBuf = new SOCKET;
+	*socketBuf = server;
+	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketClose);
+}
+
+extern "C" __declspec(dllimport) tint system_net_connect(tpointer dataAdd, tlong host, tshort port, tshort family, tint len, VM * vm);
+tint system_net_connect(tpointer dataAdd, tlong host, tshort port, tshort family, tint len, VM* vm)
+{
+	//VM传递进来的是一个指针，这个指针指向原来被保存的指针，所以取两次就能拿到真实SOCKET
+	SOCKET socket = *((SOCKET*)(*(u64*)dataAdd));
+	SOCKADDR_IN addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = host;
+	return connect(socket, reinterpret_cast<SOCKADDR*>(&addr), sizeof(addr));
+}
+
 
 extern "C" __declspec(dllimport) tint system_net_listen(tpointer dataAdd, tint len, VM * vm);
 tint system_net_listen(tpointer dataAdd, tint len, VM* vm)

@@ -1779,7 +1779,7 @@ void VM::run()
 		{
 			auto handler = unwindHandler.pop64();
 			calculateStack.push(handler);
-			unwindNumStack.push(unwindNumStack.pop64() - 1);
+			unwindNumStack.push(unwindNumStack.pop64() - 1);//回退数量减一
 		}
 		break;
 		case OPCODE::if_unneed_unwind:
@@ -2277,6 +2277,12 @@ void VM::gc()
 				if (currentThread != nullptr) //因为主线程在最开始还没有创建Thread
 				{
 					addObjectToGCRoot(GCRoots, currentThread);
+				}
+
+				//把所有待unwind的函数对象标记成不可回收
+				for (size_t idx = 0; idx < (*it)->unwindHandler.getSP(); idx += 8) {
+					u64 handler = *((u64*)((*it)->unwindHandler.getBufferAddress()) + idx);
+					addObjectToGCRoot(GCRoots, (HeapItem*)(handler - sizeof(HeapItem)));
 				}
 			}
 

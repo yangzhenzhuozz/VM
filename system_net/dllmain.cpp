@@ -17,19 +17,28 @@ tlong system_net_ip2longNative(tpointer dataAdd, VM* vm)
 	struct in_addr s;
 	int ret = inet_pton(AF_INET, buffer, (void*)&s);
 	if (ret == 0) {
-		return 0;
+		return -1;
 	}
 	else {
 		return s.S_un.S_addr;
 	}
 }
 
-void SocketClose(tpointer p)
+void SocketDispose(tpointer p)
 {
 	closesocket(*(SOCKET*)p);
 	WSACleanup();
 	delete (SOCKET*)p;
 }
+
+extern "C" __declspec(dllimport) void system_net_close(tpointer dataAdd, VM * vm);
+void system_net_close(tpointer dataAdd, VM* vm)
+{
+	//VM传递进来的是一个指针，这个指针指向原来被保存的指针，所以取两次就能拿到真实SOCKET
+	SOCKET socket = *((SOCKET*)(*(u64*)dataAdd));
+	closesocket(socket);
+}
+
 
 extern "C" __declspec(dllimport) tpointer system_net_createServerSocket(tlong host, tshort port, VM * vm);
 tpointer system_net_createServerSocket(tlong host, tshort port, VM* vm)
@@ -62,7 +71,7 @@ tpointer system_net_createServerSocket(tlong host, tshort port, VM* vm)
 
 	SOCKET* socketBuf = new SOCKET;
 	*socketBuf = server;
-	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketClose);
+	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketDispose);
 }
 
 extern "C" __declspec(dllimport) tpointer system_net_createSocket(VM * vm);
@@ -81,7 +90,7 @@ tpointer system_net_createSocket(VM* vm)
 	}
 	SOCKET* socketBuf = new SOCKET;
 	*socketBuf = server;
-	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketClose);
+	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketDispose);
 }
 
 extern "C" __declspec(dllimport) tint system_net_connect(tpointer dataAdd, tlong host, tshort port, tshort family, tint len, VM * vm);
@@ -102,7 +111,8 @@ tint system_net_listen(tpointer dataAdd, tint len, VM* vm)
 {
 	//VM传递进来的是一个指针，这个指针指向原来被保存的指针，所以取两次就能拿到真实SOCKET
 	SOCKET socket = *((SOCKET*)(*(u64*)dataAdd));
-	return listen(socket, len);
+	int ret = listen(socket, len);
+	return ret;
 }
 
 extern "C" __declspec(dllimport) tpointer system_net_accept(tpointer dataAdd, VM * vm);
@@ -118,7 +128,7 @@ tpointer system_net_accept(tpointer dataAdd, VM* vm)
 	}
 	SOCKET* socketBuf = new SOCKET;
 	*socketBuf = client;
-	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketClose);
+	return vm->addNativeResourcePointer((tlong)socketBuf, (tlong)SocketDispose);
 }
 
 extern "C" __declspec(dllimport) tint system_net_send(tpointer _scoket, tpointer buf, VM * vm);

@@ -9,7 +9,8 @@
 u64 VM::program;
 list_safe<HeapItem*> VM::heap;
 i32 VM::gcCounter = 0;
-int VM::GCcondition = 0;
+int VM::GCObjectNum = 100;
+int VM::GCWaitTime = 100;
 std::set<VM*> VM::VMs;
 std::mutex VM::waitGC;
 
@@ -2259,10 +2260,10 @@ void VM::addObjectToGCRoot(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 void VM::gc()
 {
 	for (;;) {
-		//std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		std::this_thread::sleep_for(std::chrono::milliseconds(GCWaitTime));
 		waitGC.lock();
 		//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
-		if (heap.size() >= GCcondition)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
+		if (heap.size() >= GCObjectNum)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 		{
 			gcCounter++;
 			std::list<HeapItem*> GCRoots;

@@ -45,7 +45,8 @@ public:
 	static i32 gcCounter;//允许溢出，每次执行gc的时候，计数器+1
 	static list_safe<HeapItem*> heap;//因为要删除中间的对象，所以用list
 	static u64 program;//全局的parogram对象
-	static int GCcondition;//触发GC的对象数量
+	static int GCObjectNum;//触发GC的对象数量
+	static int GCWaitTime;//GC间隔时间
 	static std::set<VM*> VMs;//已经创建的VM列表
 	static std::mutex waitGC;//用于保证同一时刻只有一个线程在GC
 

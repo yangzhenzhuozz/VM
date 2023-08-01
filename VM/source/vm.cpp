@@ -2281,9 +2281,9 @@ void VM::gc()
 				}
 
 				//把所有待unwind的函数对象标记成不可回收
-				for (size_t idx = 0; idx < (*it)->unwindHandler.getSP(); idx += 8) {
-					u64 handler = *((u64*)((*it)->unwindHandler.getBufferAddress()) + idx);
-					addObjectToGCRoot(GCRoots, (HeapItem*)(handler - sizeof(HeapItem)));
+				for (size_t idx = 0; idx < (*it)->unwindHandler.getSP() / sizeof(u64); idx++) {
+					u64* handlerArray = (u64*)(*it)->unwindHandler.getBufferAddress();
+					addObjectToGCRoot(GCRoots, (HeapItem*)(handlerArray[idx] - sizeof(HeapItem)));
 				}
 			}
 

@@ -13,6 +13,7 @@ void system_console_NativePrintBytesString(tpointer dataAdd, VM* vm)
 	std::memcpy(buffer, pointer->data, pointer->sol.length);
 	buffer[pointer->sol.length] = '\0';
 	std::cout << buffer << std::endl;
+	delete[] buffer;
 }
 
 extern "C" __declspec(dllimport) int system_console_ReadLineFromConsole(VM * vm);

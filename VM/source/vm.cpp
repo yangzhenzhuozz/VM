@@ -174,8 +174,6 @@ void VM::_NativeCall(u64 NativeIndex)
 				(*(argTyeps[argInex])).alignment = 1;//对齐
 				(*(argTyeps[argInex])).type = FFI_TYPE_STRUCT;//按结构体传参
 
-				ffi_type* p = new ffi_type[10];
-
 				ffi_type** elements = new ffi_type * [thisArgSize + 1];//创建element
 				for (int i = 0; i < thisArgSize; ++i)
 				{
@@ -249,10 +247,17 @@ void VM::_NativeCall(u64 NativeIndex)
 			delete[] args;
 			delete[] vmExportBuf;
 
+			//释放result type内存
+			for (int i = 0; i < resultSize; ++i)
+			{
+				delete retType.elements[i];
+			}
+			delete[]retType.elements;
+
+			//写回计算结果
+			memcpy(calculateStack.getBufferAddress() + calculateStack.getSP(), resultBuffer, resultSize);
+			calculateStack.setSP(calculateStack.getSP() + resultSize);
 		}
-		//写回计算结果
-		memcpy(calculateStack.getBufferAddress() + calculateStack.getSP(), resultBuffer, resultSize);
-		calculateStack.setSP(calculateStack.getSP() + resultSize);
 	}
 
 	//释放参数缓存
@@ -262,7 +267,6 @@ void VM::_NativeCall(u64 NativeIndex)
 	}
 	delete[] resultBuffer;
 }
-
 
 /*
 * 有空改成非递归算法，递归在层次多的时候确实挺慢的

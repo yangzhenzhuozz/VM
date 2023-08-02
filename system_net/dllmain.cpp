@@ -55,6 +55,7 @@ tlong system_net_ip2longNative(tpointer dataAdd, VM* vm)
 	buffer[pointer->sol.length] = '\0';
 	struct in_addr s;
 	int ret = inet_pton(AF_INET, buffer, (void*)&s);
+	delete[] buffer;
 	if (ret == 0) {
 		return -1;
 	}

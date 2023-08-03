@@ -10,7 +10,7 @@ using namespace VMStaticExport;
 struct SocketResource
 {
 	bool hasClosed = false;
-	SOCKET socket;
+	SOCKET socket = INVALID_SOCKET;
 };
 
 BOOL WINAPI DllMain(
@@ -46,8 +46,7 @@ BOOL WINAPI DllMain(
 	return TRUE;  // Successful DLL_PROCESS_ATTACH.
 }
 
-extern "C" __declspec(dllimport) tlong system_net_ip2longNative(tpointer dataAdd, VM * vm);
-tlong system_net_ip2longNative(tpointer dataAdd, VM* vm)
+extern "C" __declspec(dllexport) tlong system_net_ip2longNative(tpointer dataAdd, VM * vm)
 {
 	auto pointer = (HeapItem*)(dataAdd - sizeof(HeapItem));
 	auto buffer = new char[pointer->sol.length + 1];
@@ -75,8 +74,7 @@ void SocketDispose(tpointer p)
 	delete res;
 }
 
-extern "C" __declspec(dllimport) void system_net_close(tpointer p, VM * vm);
-void system_net_close(tpointer p, VM* vm)
+extern "C" __declspec(dllexport) void system_net_close(tpointer p, VM * vm)
 {
 	//VM传递进来的是一个指针，这个指针指向原来被保存的指针，所以取两次就能拿到真实SOCKET
 	SocketResource* res = ((SocketResource*)(*(u64*)p));
@@ -84,9 +82,7 @@ void system_net_close(tpointer p, VM* vm)
 	res->hasClosed = true;
 }
 
-
-extern "C" __declspec(dllimport) tpointer system_net_createServerSocket(tlong host, tshort port, VM * vm);
-tpointer system_net_createServerSocket(tlong host, tshort port, VM* vm)
+extern "C" __declspec(dllexport) tpointer system_net_createServerSocket(tlong host, tshort port, VM * vm)
 {
 	SOCKADDR_IN server_addr;
 	SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
@@ -95,7 +91,7 @@ tpointer system_net_createServerSocket(tlong host, tshort port, VM* vm)
 		return 0;
 	}
 
-	server_addr.sin_addr.s_addr = host;
+	server_addr.sin_addr.s_addr = (unsigned long)host;
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_port = htons(port);
 
@@ -111,8 +107,7 @@ tpointer system_net_createServerSocket(tlong host, tshort port, VM* vm)
 	return vm->addNativeResourcePointer((tlong)resource, (tlong)SocketDispose);
 }
 
-extern "C" __declspec(dllimport) tpointer system_net_createSocket(VM * vm);
-tpointer system_net_createSocket(VM* vm)
+extern "C" __declspec(dllexport) tpointer system_net_createSocket(VM * vm)
 {
 	SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
 	if (server == INVALID_SOCKET)
@@ -125,21 +120,18 @@ tpointer system_net_createSocket(VM* vm)
 	return vm->addNativeResourcePointer((tlong)resource, (tlong)SocketDispose);
 }
 
-extern "C" __declspec(dllimport) tint system_net_connect(tpointer dataAdd, tlong host, tshort port, tshort family, tint len, VM * vm);
-tint system_net_connect(tpointer dataAdd, tlong host, tshort port, tshort family, tint len, VM* vm)
+extern "C" __declspec(dllexport) tint system_net_connect(tpointer dataAdd, tlong host, tshort port, tshort family, tint len, VM * vm)
 {
 	//VM传递进来的是一个指针，这个指针指向原来被保存的指针，所以取两次就能拿到真实SOCKET
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	SOCKADDR_IN addr;
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = host;
+	addr.sin_addr.s_addr = (unsigned long)host;
 	return connect(socket, reinterpret_cast<SOCKADDR*>(&addr), sizeof(addr));
 }
 
-
-extern "C" __declspec(dllimport) tint system_net_listen(tpointer dataAdd, tint len, VM * vm);
-tint system_net_listen(tpointer dataAdd, tint len, VM* vm)
+extern "C" __declspec(dllexport) tint system_net_listen(tpointer dataAdd, tint len, VM * vm)
 {
 	//VM传递进来的是一个指针，这个指针指向原来被保存的指针，所以取两次就能拿到真实SOCKET
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
@@ -147,8 +139,7 @@ tint system_net_listen(tpointer dataAdd, tint len, VM* vm)
 	return ret;
 }
 
-extern "C" __declspec(dllimport) tpointer system_net_accept(tpointer dataAdd, VM * vm);
-tpointer system_net_accept(tpointer dataAdd, VM* vm)
+extern "C" __declspec(dllexport) tpointer system_net_accept(tpointer dataAdd, VM * vm)
 {
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	SOCKADDR_IN client_addr;
@@ -164,24 +155,21 @@ tpointer system_net_accept(tpointer dataAdd, VM* vm)
 	return vm->addNativeResourcePointer((tlong)resource, (tlong)SocketDispose);
 }
 
-extern "C" __declspec(dllimport) tint system_net_send(tpointer dataAdd, tpointer buf, VM * vm);
-tint system_net_send(tpointer dataAdd, tpointer buf, VM* vm)
+extern "C" __declspec(dllexport) tint system_net_send(tpointer dataAdd, tpointer buf, VM * vm)
 {
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	auto pointer = (HeapItem*)(buf - sizeof(HeapItem));
-	return send(socket, pointer->data, pointer->sol.length, 0);
+	return send(socket, pointer->data, (int)pointer->sol.length, 0);
 }
 
-extern "C" __declspec(dllimport) tint system_net_read(tpointer _scoket, tpointer buf, VM * vm);
-tint system_net_read(tpointer dataAdd, tpointer buf, VM* vm)
+extern "C" __declspec(dllexport) tint system_net_read(tpointer dataAdd, tpointer buf, VM * vm)
 {
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	auto pointer = (HeapItem*)(buf - sizeof(HeapItem));
-	return recv(socket, pointer->data, pointer->sol.length, 0);
+	return recv(socket, pointer->data, (int)pointer->sol.length, 0);
 }
 
-extern "C" __declspec(dllimport) tlong system_net_getSocketAddress(tpointer _scoket, VM * vm);
-tlong system_net_getSocketAddress(tpointer dataAdd, VM* vm)
+extern "C" __declspec(dllexport) tlong system_net_getSocketAddress(tpointer dataAdd, VM * vm)
 {
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	struct sockaddr_in addr;
@@ -196,8 +184,8 @@ tlong system_net_getSocketAddress(tpointer dataAdd, VM* vm)
 		return -1;
 	}
 }
-extern "C" __declspec(dllimport) tshort system_net_getSocketPort(tpointer _scoket, VM * vm);
-tshort system_net_getSocketPort(tpointer dataAdd, VM* vm)
+
+extern "C" __declspec(dllexport) tshort system_net_getSocketPort(tpointer dataAdd, VM * vm)
 {
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	struct sockaddr_in addr;
@@ -212,8 +200,8 @@ tshort system_net_getSocketPort(tpointer dataAdd, VM* vm)
 		return 0;
 	}
 }
-extern "C" __declspec(dllimport) tshort system_net_getSocketFamily(tpointer _scoket, VM * vm);
-tshort system_net_getSocketFamily(tpointer dataAdd, VM* vm)
+
+extern "C" __declspec(dllexport) tshort system_net_getSocketFamily(tpointer dataAdd, VM * vm)
 {
 	SOCKET socket = ((SocketResource*)(*(u64*)dataAdd))->socket;
 	struct sockaddr_in addr;

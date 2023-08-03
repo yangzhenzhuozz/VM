@@ -42,13 +42,14 @@ struct FrameItem
 class VM
 {
 public:
-	static i32 gcCounter;//允许溢出，每次执行gc的时候，计数器+1
+	static u64 gcCounter;//允许溢出，每次执行gc的时候，计数器+1
 	static list_safe<HeapItem*> heap;//因为要删除中间的对象，所以用list
 	static u64 program;//全局的parogram对象
 	static int GCObjectNum;//触发GC的对象数量
 	static int GCWaitTime;//GC间隔时间
-	static std::set<VM*> VMs;//已经创建的VM列表
-	static std::mutex waitGC;//用于保证同一时刻只有一个线程在GC
+	static set_safe<VM*> VMs;//已经创建的VM列表
+
+	static std::mutex GCRunnig;//GC正在运行
 
 	static StringPool* stringPool;
 	static ClassTable* classTable;
@@ -73,7 +74,7 @@ public:
 	~VM();
 
 private:
-	volatile bool isSafePoint = false;
+	std::mutex isSafePoint;
 	bool yield = false;
 
 	Stack varStack;
@@ -93,7 +94,7 @@ private:
 	bool VMError = false;
 
 	u64 newArray(u64 elementType, u32* param, u64 levelLen, u64 level);//数组类型，创建参数如创建一个三维数组[1][2][3]，参数长度，当前层级
-	
+
 	void _throw(u64 type);
 	void _VMThrowError(u64 type, u64 init, u64 constructor);
 	void pop_stack_map(u64 level, bool isThrowPopup);

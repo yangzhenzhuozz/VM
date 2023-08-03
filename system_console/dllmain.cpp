@@ -4,9 +4,7 @@
 
 using namespace VMStaticExport;
 
-extern "C" __declspec(dllimport) void system_console_NativePrintBytesString(tpointer dataAdd, VM * vm);
-
-void system_console_NativePrintBytesString(tpointer dataAdd, VM* vm)
+extern "C" __declspec(dllexport) void system_console_NativePrintBytesString(tpointer dataAdd, VM* vm)
 {
 	auto pointer = (HeapItem*)(dataAdd - sizeof(HeapItem));
 	auto buffer = new char[pointer->sol.length + 1];
@@ -16,9 +14,7 @@ void system_console_NativePrintBytesString(tpointer dataAdd, VM* vm)
 	delete[] buffer;
 }
 
-extern "C" __declspec(dllimport) int system_console_ReadLineFromConsole(VM * vm);
-
-int system_console_ReadLineFromConsole(VM* vm)
+extern "C" __declspec(dllexport) int system_console_ReadLineFromConsole(VM* vm)
 {
 	char c;
 	c = std::cin.get();

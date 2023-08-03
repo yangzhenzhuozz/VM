@@ -8,11 +8,11 @@
 
 u64 VM::program;
 list_safe<HeapItem*> VM::heap;
-i32 VM::gcCounter = 0;
+u64 VM::gcCounter = 0;
 int VM::GCObjectNum = 100;
 int VM::GCWaitTime = 100;
-std::set<VM*> VM::VMs;
-std::mutex VM::waitGC;
+set_safe<VM*> VM::VMs;
+std::mutex VM::GCRunnig;
 
 StringPool* VM::stringPool;
 ClassTable* VM::classTable;
@@ -64,8 +64,8 @@ VM::VM() :
 	unwindHandler(Stack()),
 	unwindNumStack(Stack())
 {
-	//这里不需要抢占gc线程的锁，因为只有两个地方会创建vm实例，主线程是先创建vm之后才创建gc线程，而fork的时候当前线程一定是处于非安全点中
 	VMs.insert(this);
+	isSafePoint.lock();
 }
 
 void VM::_NativeCall(u64 NativeIndex)
@@ -2083,7 +2083,7 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 			}
 			else//元素是引用类型
 			{
-				u64 obj = *((u64*)(dataAddress + 8 * index));
+				u64 obj = *((u64*)(dataAddress + (u64)8 * index));
 				if (obj != 0)
 				{
 					GCClassFieldAnalyze(GCRoots, obj, elementTypeDesc.innerType);
@@ -2092,7 +2092,7 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 		}
 		else if (elementTypeDesc.desc == typeItemDesc::Array)//数组元素是还是数组
 		{
-			u64 arr = *((u64*)(dataAddress + 8 * index));
+			u64 arr = *((u64*)(dataAddress + (u64)8 * index));
 			if (arr != 0)
 			{
 				if (mark(GCRoots, (HeapItem*)(arr - sizeof(HeapItem))))
@@ -2103,7 +2103,7 @@ void VM::GCArrayAnalyze(std::list<HeapItem*>& GCRoots, u64 dataAddress)
 		}
 		else//元素是函数类型
 		{
-			u64 obj = *((u64*)(dataAddress + 8 * index));
+			u64 obj = *((u64*)(dataAddress + (u64)8 * index));
 			if (obj != 0)
 			{
 				if (mark(GCRoots, (HeapItem*)(obj - sizeof(HeapItem))))
@@ -2223,35 +2223,25 @@ bool VM::mark(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 
 void VM::entrySafePoint(bool isExit)
 {
-	isSafePoint = true;
+	if (isExit)
+	{
+		gcExit = true;
+	}
+	isSafePoint.unlock();//给GC线程机会
+	isSafePoint.lock();
 	if (yield)
 	{
 		yield = false;
 		std::this_thread::yield();//此时已经进入安全点,即使yield,GC线程也能正常工作
 	}
-	if (!waitGC.try_lock())//如果GC线程已经在等待GC了，则等待GC完毕再返回
-	{
-		waitGC.lock();//等待
-	}
 	if (isExit)
 	{
-		//此时已经拿到锁了
-		gcExit = true;
-		waitGC.unlock();//让GC线程再跑一次
-		for (;;)
-		{
-			if (gcExit)//等待GC线程成功把信号设置
-			{
-				std::this_thread::yield();
-			}
-			else
-			{
-				exit(0);//结束程序
-			}
-		}
+		isSafePoint.unlock();//再给GC线程一次机会
+		isSafePoint.lock();
+		GCRunnig.lock();//等待GC线程运行结束
+		GCRunnig.unlock();
+		exit(0);
 	}
-	isSafePoint = false;
-	waitGC.unlock();
 }
 void VM::addObjectToGCRoot(std::list<HeapItem*>& GCRoots, HeapItem* pointer)
 {
@@ -2265,19 +2255,17 @@ void VM::gc()
 {
 	for (;;) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(GCWaitTime));
-		waitGC.lock();
+		GCRunnig.lock();
 		//需要注意的是，在C++11之后std::list的size才是O(1)，如果用C++98编译，还是自己实现list比较好
 		if (heap.size() >= GCObjectNum)//如果堆的对象数量小于GCcondition，且不是强制GC，则不进入GC
 		{
 			gcCounter++;
 			std::list<HeapItem*> GCRoots;
-
+			std::list<std::mutex*> lockedVM;//记录一下本次GC被锁住的线程
 			for (auto it = VMs.begin(); it != VMs.end(); it++)//等待所有的线程都进入safePoint
 			{
-				for (; !(*it)->isSafePoint;)
-				{
-					std::this_thread::yield();
-				}
+				(*it)->isSafePoint.lock();
+				lockedVM.push_back(&(*it)->isSafePoint);
 				HeapItem* currentThread = (*it)->currentThread;
 				if (currentThread != nullptr) //因为主线程在最开始还没有创建Thread
 				{
@@ -2300,19 +2288,21 @@ void VM::gc()
 				VariableStackAnalysis(**it, GCRoots);
 			}
 			sweep();
+			for (auto it = lockedVM.begin(); it != lockedVM.end(); it++)//释放锁
+			{
+				(*it)->unlock();
+			}
 		}
+		GCRunnig.unlock();
 		if (gcExit)
 		{
-			gcExit = false;//产生一个跳动信号
-			waitGC.unlock();
+			gcExit = false;//产生跳变信号
 			break;
 		}
-		waitGC.unlock();
 	}
 }
 VM::~VM()
 {
-	VM::waitGC.lock();
 	VMs.erase(this);
-	VM::waitGC.unlock();
+	isSafePoint.unlock();
 }

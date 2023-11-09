@@ -2237,10 +2237,8 @@ void VM::entrySafePoint(bool isExit)
 	if (isExit)
 	{
 		isSafePoint.unlock();//再给GC线程一次机会
-		GCRunnig.lock();//等待GC线程运行结束
-		isSafePoint.lock();
+		GCRunnig.lock();//等待GC线程运行结束;
 		GCRunnig.unlock();
-  isSafePoint.lock();
 		exit(0);
 	}
 }
@@ -2297,7 +2295,6 @@ void VM::gc()
 		GCRunnig.unlock();
 		if (gcExit)
 		{
-			gcExit = false;//产生跳变信号
 			break;
 		}
 	}

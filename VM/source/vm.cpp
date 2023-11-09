@@ -2240,6 +2240,7 @@ void VM::entrySafePoint(bool isExit)
 		GCRunnig.lock();//等待GC线程运行结束
 		isSafePoint.lock();
 		GCRunnig.unlock();
+  isSafePoint.lock();
 		exit(0);
 	}
 }

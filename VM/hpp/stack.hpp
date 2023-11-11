@@ -6,7 +6,7 @@ class Stack
     u64 bp;
     u64 sp;
     char* buffer;
-    char* popBuffer;
+    const size_t limit = 1024 * 1024 * 2;
 
 public:
     Stack();
